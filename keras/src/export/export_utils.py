@@ -1,8 +1,14 @@
+import itertools
+import string
+
 from keras.src import backend
 from keras.src import layers
 from keras.src import models
 from keras.src import ops
 from keras.src import tree
+from keras.src.backend.common import KerasTensor
+from keras.src.backend.common import standardize_dtype
+from keras.src.backend.common import standardize_shape
 from keras.src.utils.module_utils import tensorflow as tf
 
 
@@ -86,13 +92,13 @@ def make_input_spec(x):
                 f"The `shape` and `dtype` must be provided. Received: x={x}"
             )
         input_spec = x
-    elif isinstance(x, backend.KerasTensor):
-        shape = (None,) + backend.standardize_shape(x.shape)[1:]
-        dtype = backend.standardize_dtype(x.dtype)
+    elif isinstance(x, KerasTensor):
+        shape = (None,) + standardize_shape(x.shape)[1:]
+        dtype = standardize_dtype(x.dtype)
         input_spec = layers.InputSpec(dtype=dtype, shape=shape, name=x.name)
-    elif backend.is_tensor(x):
-        shape = (None,) + backend.standardize_shape(x.shape)[1:]
-        dtype = backend.standardize_dtype(x.dtype)
+    elif backend.ops.is_tensor(x):
+        shape = (None,) + standardize_shape(x.shape)[1:]
+        dtype = standardize_dtype(x.dtype)
         input_spec = layers.InputSpec(dtype=dtype, shape=shape, name=None)
     else:
         raise TypeError(
@@ -135,10 +141,57 @@ def make_tf_tensor_spec(x, dynamic_batch=False):
 
 
 def convert_spec_to_tensor(spec, replace_none_number=None):
-    shape = backend.standardize_shape(spec.shape)
+    shape = standardize_shape(spec.shape)
     if replace_none_number is not None:
         replace_none_number = int(replace_none_number)
         shape = tuple(
             s if s is not None else replace_none_number for s in shape
         )
     return ops.ones(shape, spec.dtype)
+
+
+def to_polymorphic_shape(struct, allow_none=True):
+    """Converts a structure of specs to JAX polymorphic shape strings.
+
+    Each leaf with a `shape` attribute (e.g. `keras.InputSpec`,
+    `tf.TensorSpec`, `KerasTensor`) is turned into a string such as
+    `"(batch, 10)"` that `jax2tf.convert` and `jax.export.symbolic_shape`
+    understand. Known dimensions are kept as ints; the leading `None`
+    dimension is named `batch` (shared across all leaves) and the other
+    `None` dimensions get a unique symbol each (`a`, `b`, ..., `aa`, ...).
+
+    Args:
+        struct: A (possibly nested) structure of specs.
+        allow_none: Whether `None` dimensions are allowed. If `False`, a
+            `ValueError` is raised for any `None` dimension.
+
+    Returns:
+        A structure of strings with the same layout as `struct`.
+    """
+    if allow_none:
+        # Generates unique names: a, b, ... z, aa, ab, ... az, ba, ... zz
+        # for unknown non-batch dims. Defined here to be scope per endpoint.
+        dim_names = itertools.chain(
+            string.ascii_lowercase,
+            itertools.starmap(
+                lambda a, b: a + b,
+                itertools.product(string.ascii_lowercase, repeat=2),
+            ),
+        )
+
+    def convert_shape(x):
+        poly_shape = []
+        for index, dim in enumerate(list(x.shape)):
+            if dim is not None:
+                poly_shape.append(str(dim))
+            elif not allow_none:
+                raise ValueError(
+                    f"Illegal None dimension in {x} with shape {x.shape}"
+                )
+            elif index == 0:
+                poly_shape.append("batch")
+            else:
+                poly_shape.append(next(dim_names))
+        return f"({', '.join(poly_shape)})"
+
+    return tree.map_structure(convert_shape, struct)

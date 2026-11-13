@@ -1,10 +1,10 @@
 import numpy as np
-from tensorflow import data as tf_data
 
 import keras
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class RandomSaturationTest(testing.TestCase):
@@ -65,7 +65,7 @@ class RandomSaturationTest(testing.TestCase):
         layer = layers.RandomSaturation(factor=(1.0, 1.0))
         result = layer(inputs)
 
-        hsv = backend.image.rgb_to_hsv(result)
+        hsv = backend.ops.image.rgb_to_hsv(result)
         s_channel = hsv[..., 1]
 
         self.assertAllClose(
@@ -92,6 +92,6 @@ class RandomSaturationTest(testing.TestCase):
             factor=0.5, data_format=data_format, seed=1337
         )
 
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         for output in ds.take(1):
             output.numpy()

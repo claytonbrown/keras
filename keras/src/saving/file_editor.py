@@ -1,5 +1,6 @@
 import collections
 import json
+import math
 import os.path
 import pprint
 import zipfile
@@ -7,8 +8,8 @@ import zipfile
 import numpy as np
 import rich.console
 
-from keras.src import backend
 from keras.src.api_export import keras_export
+from keras.src.backend.common import KerasTensor
 from keras.src.saving import saving_lib
 from keras.src.saving.saving_lib import H5IOStore
 from keras.src.utils import naming
@@ -76,15 +77,25 @@ class KerasFileEditor:
 
         if filepath.endswith(".keras"):
             zf = zipfile.ZipFile(filepath, "r")
+            try:
+                saving_lib._reject_zip_archive_bomb(zf)
+            except Exception:
+                zf.close()
+                raise
+            # Reject a decompression-bomb weights member up front, mirroring
+            # `saving_lib._load_model_from_fileobj`.
+            saving_lib._reject_zip_bomb(zf, saving_lib._VARS_FNAME_H5)
             weights_store = H5IOStore(
-                f"{saving_lib._VARS_FNAME}.h5",
+                saving_lib._VARS_FNAME_H5,
                 archive=zf,
                 mode="r",
             )
-            with zf.open(saving_lib._CONFIG_FILENAME, "r") as f:
-                config_json = f.read()
-            with zf.open(saving_lib._METADATA_FILENAME, "r") as f:
-                metadata_json = f.read()
+            config_json = saving_lib._safe_zip_read(
+                zf, saving_lib._CONFIG_FILENAME
+            )
+            metadata_json = saving_lib._safe_zip_read(
+                zf, saving_lib._METADATA_FILENAME
+            )
             self.config = json.loads(config_json)
             self.metadata = json.loads(metadata_json)
 
@@ -528,6 +539,12 @@ class KerasFileEditor:
                     f"{value.external}"
                 )
 
+            if value.is_virtual:
+                raise ValueError(
+                    "Not allowed: H5 file with virtual Dataset at "
+                    f"{current_inner_path}"
+                )
+
             shape = value.shape
             dtype = value.dtype
 
@@ -550,7 +567,7 @@ class KerasFileEditor:
                 )
 
             # Safe product computation (Python int is unbounded)
-            num_elems = int(np.prod(shape))
+            num_elems = math.prod(shape)
 
             # ------------------------------------------------------
             # Validate TOTAL memory size
@@ -698,7 +715,7 @@ def get_weight_spec_of_saveable(saveable, spec, visited_saveables=None):
             keys = sorted(store.keys())
             for k in keys:
                 val = store[k]
-                spec[k] = backend.KerasTensor(shape=val.shape, dtype=val.dtype)
+                spec[k] = KerasTensor(shape=val.shape, dtype=val.dtype)
 
     visited_saveables.add(id(saveable))
 

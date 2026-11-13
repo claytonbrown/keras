@@ -2,7 +2,7 @@ import numpy as np
 
 from keras.src import layers
 from keras.src import testing
-from keras.src.backend.common.keras_tensor import KerasTensor
+from keras.src.backend.common import KerasTensor
 
 
 class UpSamplingTest(testing.TestCase):
@@ -59,3 +59,22 @@ class UpSamplingTest(testing.TestCase):
         z = KerasTensor([2, 3, None])
         self.assertEqual(layers.UpSampling1D(size=2)(z).shape, (2, 6, None))
         self.assertEqual(layers.UpSampling1D(size=4)(z).shape, (2, 12, None))
+
+    def test_upsampling_1d_with_invalid_size(self):
+        # `UpSampling2D` / `UpSampling3D` already reject these; `UpSampling1D`
+        # should be consistent.
+        for size in (0, -2):
+            with self.assertRaisesRegex(
+                ValueError, "Expected `size` to be an integer >= 1"
+            ):
+                layers.UpSampling1D(size=size)
+        for size in (2.5, "2", True):
+            with self.assertRaisesRegex(
+                TypeError, "Expected `size` to be an integer"
+            ):
+                layers.UpSampling1D(size=size)
+
+    def test_numpy_integer_size(self):
+        layer = layers.UpSampling1D(size=np.int64(3))
+        self.assertIs(type(layer.size), int)
+        self.assertEqual(layer.size, 3)

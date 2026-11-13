@@ -26,6 +26,12 @@ def export_litert(
         filepath: The path to save the exported artifact.
         input_signature: Optional input signature specification. If
             `None`, it will be inferred.
+            Note: With the PyTorch backend, dynamic input shapes are not
+            supported. Any dynamic dimensions (represented as `None`) will
+            be automatically replaced with `1` during export, which may
+            cause runtime failures for other shapes. You must explicitly
+            pass a fixed static `input_signature` matching your maximum
+            runtime shape.
         **kwargs: Additional keyword arguments passed to the exporter.
     """
     filepath = str(filepath)
@@ -187,8 +193,8 @@ def export_litert_via_torch(
     model, filepath, input_signature=None, verbose=None, **kwargs
 ):
     """Export Keras model to LiteRT via PyTorch backend."""
-    from keras.src.backend.torch.core import device_scope
-    from keras.src.backend.torch.core import get_device
+    from keras.src.backend.torch.ops.core import device_scope
+    from keras.src.backend.torch.ops.core import get_device
 
     device = get_device()
 

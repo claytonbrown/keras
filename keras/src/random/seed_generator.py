@@ -5,6 +5,7 @@ import numpy as np
 from keras.src import backend
 from keras.src.api_export import keras_export
 from keras.src.backend.common import global_state
+from keras.src.utils import argument_validation
 from keras.src.utils import jax_utils
 from keras.src.utils.naming import auto_name
 
@@ -72,24 +73,20 @@ class SeedGenerator:
         else:
             self.backend = backend
 
+        seed = argument_validation.validate_int("seed", seed, allow_none=True)
         self._initial_seed = seed
         if seed is None:
             seed = make_default_seed()
 
-        if not isinstance(seed, int):
-            raise ValueError(
-                f"Argument `seed` must be an integer. Received: seed={seed}"
-            )
-
         def seed_initializer(*args, **kwargs):
             dtype = kwargs.get("dtype", None)
-            return self.backend.convert_to_tensor([seed, 0], dtype=dtype)
+            return self.backend.ops.convert_to_tensor([seed, 0], dtype=dtype)
 
         with self.backend.name_scope(self.name, caller=self):
             self.state = self.backend.Variable(
                 seed_initializer,
                 shape=(2,),
-                dtype=self.backend.random_seed_dtype(),
+                dtype=self.backend.ops.random_seed_dtype(),
                 trainable=False,
                 aggregation="none",
                 name="seed_generator_state",
@@ -100,10 +97,10 @@ class SeedGenerator:
         # Use * 1 to create a copy
         new_seed_value = seed_state.value * 1
         if ordered:
-            increment = self.backend.convert_to_tensor(
+            increment = self.backend.ops.convert_to_tensor(
                 np.array([0, 1]), dtype=seed_state.dtype
             )
-            self.state.assign(self.backend.numpy.add(seed_state, increment))
+            self.state.assign(self.backend.ops.numpy.add(seed_state, increment))
         else:
             # This produces a sequence of near-unique numbers
             # between 0 and 1M
@@ -147,13 +144,11 @@ def make_default_seed():
 
 
 def draw_seed(seed):
-    from keras.src.backend import convert_to_tensor
-    from keras.src.backend import random_seed_dtype
-
     if isinstance(seed, SeedGenerator):
         return seed.next()
-    elif isinstance(seed, int):
-        dtype = random_seed_dtype()
+    elif isinstance(seed, (int, np.integer)):
+        seed = int(seed)
+        dtype = backend.ops.random_seed_dtype()
         # Seeds are conceptually uint32 values but some backends declare
         # their seed dtype as a signed type (e.g. "int32"). np.array(x,
         # dtype="int32") raises OverflowError on NumPy >= 1.24 for values
@@ -164,7 +159,7 @@ def draw_seed(seed):
         if dtype == "int32":
             # Re-interpret the bits of a uint32 as an int32.
             seed = (seed & 0xFFFFFFFF ^ 0x80000000) - 0x80000000
-        return convert_to_tensor([seed, 0], dtype=dtype)
+        return backend.ops.convert_to_tensor([seed, 0], dtype=dtype)
     elif seed is None:
         return global_seed_generator().next(ordered=False)
     raise ValueError(

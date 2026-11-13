@@ -2,6 +2,7 @@ import numpy as np
 
 from keras.src import backend
 from keras.src.api_export import keras_export
+from keras.src.backend.common import KerasTensor
 from keras.src.layers.layer import Layer
 from keras.src.layers.preprocessing.index_lookup import listify_tensors
 from keras.src.layers.preprocessing.string_lookup import StringLookup
@@ -10,6 +11,14 @@ from keras.src.utils import argument_validation
 from keras.src.utils import backend_utils
 from keras.src.utils import tf_utils
 from keras.src.utils.module_utils import tensorflow as tf
+from keras.src.utils.progbar import Progbar
+
+
+def _extract_batch(batch):
+    """Return input from batch; handle (x, y) or (x, y, sample_weight)."""
+    if isinstance(batch, tuple):
+        return batch[0]
+    return batch
 
 
 @keras_export("keras.layers.TextVectorization")
@@ -52,7 +61,7 @@ class TextVectorization(Layer):
        by the callable depends on the active Keras backend. With the
        TensorFlow backend, the callable receives a `tf.Tensor` of dtype
        `string`, so it should use `tf.strings` operations. With any other
-       backend (JAX, NumPy, PyTorch, OpenVINO) the callable receives a
+       backend (JAX, NumPy, PyTorch) the callable receives a
        NumPy array of unicode strings, so it should use `np.char` /
        `np.strings` operations (or any vectorized string logic of your
        choice). The callable should return data of the same shape as the
@@ -284,27 +293,22 @@ class TextVectorization(Layer):
         )
 
         # 'ngrams' must be one of (None, int, tuple(int))
-        if not (
-            ngrams is None
-            or isinstance(ngrams, int)
-            or isinstance(ngrams, tuple)
-            and all(isinstance(item, int) for item in ngrams)
-        ):
-            raise ValueError(
-                "`ngrams` must be None, an integer, or a tuple of "
-                f"integers. Received: ngrams={ngrams}"
+        if isinstance(ngrams, (list, tuple)):
+            ngrams = tuple(
+                argument_validation.validate_int_sequence("ngrams", ngrams)
+            )
+        else:
+            ngrams = argument_validation.validate_int(
+                "ngrams", ngrams, allow_none=True
             )
 
         # 'output_sequence_length' must be one of (None, int) and is only
         # set if output_mode is "int"".
-        if output_mode == "int" and not (
-            isinstance(output_sequence_length, int)
-            or (output_sequence_length is None)
-        ):
-            raise ValueError(
-                "`output_sequence_length` must be either None or an "
-                "integer when `output_mode` is 'int'. Received: "
-                f"output_sequence_length={output_sequence_length}"
+        if output_mode == "int":
+            output_sequence_length = argument_validation.validate_int(
+                "output_sequence_length",
+                output_sequence_length,
+                allow_none=True,
             )
 
         if output_mode != "int" and output_sequence_length is not None:
@@ -388,7 +392,7 @@ class TextVectorization(Layer):
             output_dtype = "int64"
         else:
             output_dtype = backend.floatx()
-        return backend.KerasTensor(output_shape, dtype=output_dtype)
+        return KerasTensor(output_shape, dtype=output_dtype)
 
     def adapt(self, data, batch_size=None, steps=None):
         """Computes a vocabulary of string terms from tokens in a dataset.
@@ -422,19 +426,33 @@ class TextVectorization(Layer):
         """
         self.reset_state()
         if isinstance(data, tf.data.Dataset):
+            if steps is None and hasattr(data, "cardinality"):
+                cardinality = data.cardinality()
+                if cardinality.numpy() not in (
+                    tf.data.UNKNOWN_CARDINALITY,
+                    tf.data.INFINITE_CARDINALITY,
+                ):
+                    steps = int(cardinality.numpy())
+
+            progbar = Progbar(target=steps, unit_name="step")
             if steps is not None:
                 data = data.take(steps)
-            for batch in data:
-                self.update_state(batch)
+            for i, batch in enumerate(data):
+                self.update_state(_extract_batch(batch))
+                progbar.update(i + 1)
+            progbar.update(steps if steps is not None else i + 1, finalize=True)
         elif hasattr(data, "__iter__") and not (
             isinstance(data, (list, tuple, np.ndarray))
-            or backend.is_tensor(data)
+            or backend.ops.is_tensor(data)
             or tf.is_tensor(data)
         ):
+            progbar = Progbar(target=steps, unit_name="step")
             for i, batch in enumerate(data):
                 if steps is not None and i >= steps:
                     break
-                self.update_state(batch)
+                self.update_state(_extract_batch(batch))
+                progbar.update(i + 1)
+            progbar.update(steps if steps is not None else i + 1, finalize=True)
         else:
             data = tf_utils.ensure_tensor(data, dtype="string")
             if data.shape.rank == 1:
@@ -541,8 +559,8 @@ class TextVectorization(Layer):
         """
         if isinstance(inputs, np.ndarray):
             np_inputs = inputs
-        elif backend.is_tensor(inputs):
-            np_inputs = backend.convert_to_numpy(inputs)
+        elif backend.ops.is_tensor(inputs):
+            np_inputs = backend.ops.convert_to_numpy(inputs)
         else:
             np_inputs = np.asarray(inputs)
 
@@ -563,8 +581,8 @@ class TextVectorization(Layer):
     def _preprocess(self, inputs):
         if not isinstance(
             inputs, (tf.Tensor, tf.RaggedTensor, np.ndarray, list, tuple)
-        ) and backend.is_tensor(inputs):
-            inputs = backend.convert_to_numpy(inputs)
+        ) and backend.ops.is_tensor(inputs):
+            inputs = backend.ops.convert_to_numpy(inputs)
         with tf.device("CPU:0"):
             if (
                 callable(self._standardize)

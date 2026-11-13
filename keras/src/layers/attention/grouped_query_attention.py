@@ -3,17 +3,20 @@ import math
 from keras.src import backend
 from keras.src import constraints
 from keras.src import initializers
-from keras.src import ops
 from keras.src import regularizers
 from keras.src.api_export import keras_export
+from keras.src.backend.common import KerasTensor
 from keras.src.backend.config import is_flash_attention_enabled
 from keras.src.layers.activations.softmax import Softmax
 from keras.src.layers.core.einsum_dense import EinsumDense
 from keras.src.layers.layer import Layer
 from keras.src.layers.regularization.dropout import Dropout
+from keras.src.utils import argument_validation
 
 
-@keras_export("keras.layers.GroupQueryAttention")
+@keras_export(
+    ["keras.layers.GroupedQueryAttention", "keras.layers.GroupQueryAttention"]
+)
 class GroupedQueryAttention(Layer):
     """Grouped Query Attention layer.
 
@@ -133,14 +136,9 @@ class GroupedQueryAttention(Layer):
         self.dropout = dropout
         self.use_bias = use_bias
         self.use_gate = use_gate
-        if sliding_window is not None and (
-            not isinstance(sliding_window, int) or sliding_window <= 0
-        ):
-            raise ValueError(
-                "`sliding_window` must be `None` or a positive integer. "
-                f"Received: sliding_window={sliding_window}"
-            )
-        self.sliding_window = sliding_window
+        self.sliding_window = argument_validation.validate_int(
+            "sliding_window", sliding_window, allow_none=True, min_value=1
+        )
         self._flash_attention = flash_attention or is_flash_attention_enabled()
         self.kernel_initializer = initializers.get(kernel_initializer)
         self.bias_initializer = initializers.get(bias_initializer)
@@ -271,38 +269,62 @@ class GroupedQueryAttention(Layer):
         if key is None:
             key = value
 
-        attention_mask = self._compute_attention_mask(
-            query,
-            value,
-            query_mask=query_mask,
-            value_mask=value_mask,
-            key_mask=key_mask,
-            attention_mask=attention_mask,
-            use_causal_mask=use_causal_mask,
+        # When causal masking is the only mask source, route through the
+        # backend's native causal kernel by passing `is_causal=True` rather
+        # than materializing a [T, S] mask tensor. Skipped when a subclass
+        # overrides `_compute_attention`, since such a subclass would
+        # receive `attention_mask=None` and silently do unmasked attention.
+        causal_only = (
+            use_causal_mask
+            and query_mask is None
+            and value_mask is None
+            and key_mask is None
+            and attention_mask is None
+            and self.sliding_window is None
+            and type(self)._compute_attention
+            is GroupedQueryAttention._compute_attention
         )
+        if causal_only:
+            attention_mask = None
+        else:
+            attention_mask = self._compute_attention_mask(
+                query,
+                value,
+                query_mask=query_mask,
+                value_mask=value_mask,
+                key_mask=key_mask,
+                attention_mask=attention_mask,
+                use_causal_mask=use_causal_mask,
+            )
         if self.use_gate:
             gate = self._gate_dense(query)
         query = self._query_dense(query)
         key = self._key_dense(key)
         value = self._value_dense(value)
 
-        key = ops.repeat(
+        key = backend.ops.numpy.repeat(
             key, self.num_repeats, axis=2
         )  # (batch_dim, source_seq_len, query_heads, head_dim)
-        value = ops.repeat(
+        value = backend.ops.numpy.repeat(
             value, self.num_repeats, axis=2
         )  # (batch_dim, source_seq_len, query_heads, head_dim)
 
+        extra_attention_kwargs = (
+            {"use_causal_mask": True} if causal_only else {}
+        )
         output, scores = self._compute_attention(
             query,
             key,
             value,
             attention_mask=attention_mask,
             training=training,
+            **extra_attention_kwargs,
         )
         # (batch_dim, target_seq_len, feature_dim)
         if self.use_gate:
-            output = self._output_dense(ops.multiply(output, gate))
+            output = self._output_dense(
+                backend.ops.numpy.multiply(output, gate)
+            )
         else:
             output = self._output_dense(output)
 
@@ -352,18 +374,24 @@ class GroupedQueryAttention(Layer):
         """
         auto_mask = None
         if query_mask is not None:
-            query_mask = ops.cast(query_mask, "bool")  # defensive casting
+            # defensive casting
+            query_mask = backend.ops.cast(query_mask, "bool")
             # B = batch size, T = max query length
-            auto_mask = ops.expand_dims(query_mask, -1)  # shape is [B, T, 1]
+            # shape is [B, T, 1]
+            auto_mask = backend.ops.numpy.expand_dims(query_mask, -1)
         if value_mask is not None:
-            value_mask = ops.cast(value_mask, "bool")  # defensive casting
+            # defensive casting
+            value_mask = backend.ops.cast(value_mask, "bool")
             # B = batch size, S == max value length
-            mask = ops.expand_dims(value_mask, -2)  # shape is [B, 1, S]
+            # shape is [B, 1, S]
+            mask = backend.ops.numpy.expand_dims(value_mask, -2)
             auto_mask = mask if auto_mask is None else auto_mask & mask
         if key_mask is not None:
-            key_mask = ops.cast(key_mask, "bool")  # defensive casting
+            # defensive casting
+            key_mask = backend.ops.cast(key_mask, "bool")
             # B == batch size, S == max key length == max value length
-            mask = ops.expand_dims(key_mask, -2)  # shape is [B, 1, S]
+            # shape is [B, 1, S]
+            mask = backend.ops.numpy.expand_dims(key_mask, -2)
             auto_mask = mask if auto_mask is None else auto_mask & mask
         if use_causal_mask:
             # the shape of the causal mask is [1, T, S]
@@ -378,7 +406,7 @@ class GroupedQueryAttention(Layer):
             attention_mask = (
                 auto_mask
                 if attention_mask is None
-                else ops.cast(attention_mask, bool) & auto_mask
+                else backend.ops.cast(attention_mask, "bool") & auto_mask
             )
         return attention_mask
 
@@ -404,12 +432,16 @@ class GroupedQueryAttention(Layer):
             mask: a boolean tensor of shape `(1, T, S)` containing a lower
                 triangular matrix of shape `(T, S)`.
         """
-        q_seq_length = ops.shape(query)[1]
-        v_seq_length = q_seq_length if value is None else ops.shape(value)[1]
-        ones_mask = ops.ones((1, q_seq_length, v_seq_length), dtype="int32")
-        row_index = ops.cumsum(ones_mask, axis=-2)
-        col_index = ops.cumsum(ones_mask, axis=-1)
-        return ops.greater_equal(row_index, col_index)
+        q_seq_length = backend.ops.shape(query)[1]
+        v_seq_length = (
+            q_seq_length if value is None else backend.ops.shape(value)[1]
+        )
+        ones_mask = backend.ops.numpy.ones(
+            (1, q_seq_length, v_seq_length), dtype="int32"
+        )
+        row_index = backend.ops.numpy.cumsum(ones_mask, axis=-2)
+        col_index = backend.ops.numpy.cumsum(ones_mask, axis=-1)
+        return backend.ops.numpy.greater_equal(row_index, col_index)
 
     def _compute_sliding_window_mask(self, query, value=None):
         """Computes a banded sliding-window mask of shape `(1, T, S)`.
@@ -420,18 +452,30 @@ class GroupedQueryAttention(Layer):
         sliding-window pattern used by Mistral, Llama-3 long-context, and
         Phi-3.
         """
-        q_seq_length = ops.shape(query)[1]
-        v_seq_length = q_seq_length if value is None else ops.shape(value)[1]
-        row_index = ops.reshape(
-            ops.arange(q_seq_length, dtype="int32"), (1, q_seq_length, 1)
+        q_seq_length = backend.ops.shape(query)[1]
+        v_seq_length = (
+            q_seq_length if value is None else backend.ops.shape(value)[1]
         )
-        col_index = ops.reshape(
-            ops.arange(v_seq_length, dtype="int32"), (1, 1, v_seq_length)
+        row_index = backend.ops.numpy.reshape(
+            backend.ops.numpy.arange(q_seq_length, dtype="int32"),
+            (1, q_seq_length, 1),
         )
-        return ops.less(ops.abs(row_index - col_index), self.sliding_window)
+        col_index = backend.ops.numpy.reshape(
+            backend.ops.numpy.arange(v_seq_length, dtype="int32"),
+            (1, 1, v_seq_length),
+        )
+        return backend.ops.numpy.less(
+            backend.ops.numpy.abs(row_index - col_index), self.sliding_window
+        )
 
     def _compute_attention(
-        self, query, key, value, attention_mask=None, training=None
+        self,
+        query,
+        key,
+        value,
+        attention_mask=None,
+        training=None,
+        use_causal_mask=False,
     ):
         # Check for flash attention constraints
         if self._flash_attention and self._return_attention_scores:
@@ -449,6 +493,20 @@ class GroupedQueryAttention(Layer):
         )
 
         if use_dot_product_attention:
+            if use_causal_mask and attention_mask is None:
+                # Skip materializing the [T, S] mask and let the backend
+                # use its native causal kernel.
+                attention_output = backend.ops.nn.dot_product_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    bias=None,
+                    mask=None,
+                    scale=self._inverse_sqrt_head_dim,
+                    is_causal=True,
+                    flash_attention=self._flash_attention,
+                )
+                return attention_output, None
             if attention_mask is not None:
                 # Ensure attention_mask has the correct shape for broadcasting
                 # Expected shape: [batch_size, num_heads, query_seq_len,
@@ -458,31 +516,44 @@ class GroupedQueryAttention(Layer):
                 for _ in range(
                     len_attention_scores_shape - len(attention_mask.shape)
                 ):
-                    attention_mask = ops.expand_dims(
+                    attention_mask = backend.ops.numpy.expand_dims(
                         attention_mask, axis=mask_expansion_axis
                     )
-                attention_mask = ops.cast(attention_mask, dtype="bool")
+                attention_mask = backend.ops.cast(attention_mask, dtype="bool")
             # Directly compute the attention output using dot-product attention
-            attention_output = ops.dot_product_attention(
+            attention_output = backend.ops.nn.dot_product_attention(
                 query=query,
                 key=key,
                 value=value,
                 bias=None,
                 mask=attention_mask,
                 scale=self._inverse_sqrt_head_dim,
-                is_causal=False,
+                is_causal=use_causal_mask,
                 flash_attention=self._flash_attention,
             )
             return attention_output, None
 
         # Default behavior without flash attention, with explicit attention
-        # scores
-        query = ops.multiply(
-            query, ops.cast(self._inverse_sqrt_head_dim, query.dtype)
+        # scores. We skipped the fused is_causal kernel above, so build the
+        # causal mask here. `call` drops attention_mask when causal is the
+        # only mask source, expecting that kernel to run, and this path never
+        # sees the is_causal flag otherwise. When an explicit mask is also
+        # present, combine the two so neither constraint is lost.
+        if use_causal_mask:
+            causal_mask = self._compute_causal_mask(query, value)
+            attention_mask = (
+                causal_mask
+                if attention_mask is None
+                else backend.ops.numpy.logical_and(
+                    backend.ops.cast(attention_mask, "bool"), causal_mask
+                )
+            )
+        query = backend.ops.numpy.multiply(
+            query, backend.ops.cast(self._inverse_sqrt_head_dim, query.dtype)
         )
         # Take the dot product between "query" and "key" to get the raw
         # attention scores.
-        scores = ops.einsum(
+        scores = backend.ops.numpy.einsum(
             self._dot_product_equation, query, key
         )  # (batch_dim, query_heads, target_seq_len, source_seq_len)
         scores = self._masked_softmax(scores, attention_mask=attention_mask)
@@ -492,7 +563,9 @@ class GroupedQueryAttention(Layer):
             scores_dropout = self._dropout_layer(scores, training=training)
         else:
             scores_dropout = scores
-        output = ops.einsum(self._combine_equation, scores_dropout, value)
+        output = backend.ops.numpy.einsum(
+            self._combine_equation, scores_dropout, value
+        )
         return output, scores
 
     def _masked_softmax(self, scores, attention_mask=None):
@@ -504,7 +577,7 @@ class GroupedQueryAttention(Layer):
             # key_attention_dims>)
             mask_expansion_axis = -1 * 2 - 1
             for _ in range(len(scores.shape) - len(attention_mask.shape)):
-                attention_mask = ops.expand_dims(
+                attention_mask = backend.ops.numpy.expand_dims(
                     attention_mask, axis=mask_expansion_axis
                 )
         return self._softmax(scores, mask=attention_mask)
@@ -553,9 +626,7 @@ class GroupedQueryAttention(Layer):
             value.shape,
             key.shape if key is not None else None,
         )
-        output_spec = backend.KerasTensor(
-            output_shape, dtype=self.compute_dtype
-        )
+        output_spec = KerasTensor(output_shape, dtype=self.compute_dtype)
         if return_attention_scores:
             query_len = query.shape[1]
             kv_len = value.shape[1] if key is None else key.shape[1]
@@ -565,7 +636,7 @@ class GroupedQueryAttention(Layer):
                 query_len,
                 kv_len,
             )
-            return output_spec, backend.KerasTensor(
+            return output_spec, KerasTensor(
                 scores_shape, dtype=self.compute_dtype
             )
         return output_spec

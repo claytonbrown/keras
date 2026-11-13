@@ -1,11 +1,11 @@
 import numpy as np
 from absl.testing import parameterized
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import models
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class CenterCropTest(testing.TestCase):
@@ -169,7 +169,7 @@ class CenterCropTest(testing.TestCase):
             output_shape = (2, 3, 8, 9)
         layer = layers.CenterCrop(8, 9)
         input_data = np.random.random(input_shape)
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         output = next(iter(ds)).numpy()
         self.assertEqual(tuple(output.shape), output_shape)
 
@@ -283,7 +283,7 @@ class CenterCropTest(testing.TestCase):
 
         input_data = {"images": input_image, "bounding_boxes": bounding_boxes}
 
-        ds = tf_data.Dataset.from_tensor_slices(input_data)
+        ds = tf.data.Dataset.from_tensor_slices(input_data)
         center_crop_layer = layers.CenterCrop(
             height=height,
             width=width,
@@ -309,3 +309,17 @@ class CenterCropTest(testing.TestCase):
             yield (np.random.random(small_input).astype("float32"),)
 
         model.predict(generator())
+
+    def test_segmentation_mask_preserves_dtype_and_classes(self):
+        # Masks hold discrete class indices; the resize fallback must use
+        # nearest-neighbor interpolation so no new classes appear, and the
+        # integer dtype must be preserved. See keras-team/keras#20857.
+        images = np.random.random((2, 8, 8, 3)).astype("float32")
+        masks = np.zeros((2, 8, 8, 1), dtype="uint8")
+        masks[:, :4] = 4  # only classes {0, 4}
+        # Target larger than input forces the resize path.
+        layer = layers.CenterCrop(16, 16)
+        out = layer({"images": images, "segmentation_masks": masks})
+        result = backend.ops.convert_to_numpy(out["segmentation_masks"])
+        self.assertEqual(result.dtype, np.uint8)
+        self.assertTrue(set(np.unique(result).tolist()).issubset({0, 4}))

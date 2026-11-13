@@ -1,10 +1,10 @@
 import numpy as np
 import pytest
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class CanaryLayer(layers.Layer):
@@ -65,7 +65,7 @@ class PipelineTest(testing.TestCase):
             ]
         )
         input_data = np.random.random(input_shape)
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         for output in ds.take(1):
             output = output.numpy()
         self.assertEqual(tuple(output.shape), output_shape)
@@ -87,3 +87,19 @@ class PipelineTest(testing.TestCase):
         restored_output = restored(x)
         self.assertEqual(tuple(output.shape), (2, 8, 9, 3))
         self.assertAllClose(output, restored_output)
+
+    def test_from_config_malformed_raises_value_error(self):
+        # A missing or non-list `layers` key should raise a clear ValueError
+        # instead of an opaque KeyError / TypeError.
+        with self.assertRaisesRegex(ValueError, "layers"):
+            layers.Pipeline.from_config({"name": "test"})
+        with self.assertRaisesRegex(ValueError, "layers"):
+            layers.Pipeline.from_config({"layers": None, "name": "test"})
+
+    def test_from_config_does_not_mutate_input(self):
+        pipeline = layers.Pipeline([layers.AutoContrast()])
+        config = pipeline.get_config()
+        serialized_layers = config["layers"]
+        layers.Pipeline.from_config(config)
+        # `from_config` must not deserialize the caller's config in place.
+        self.assertIs(config["layers"], serialized_layers)

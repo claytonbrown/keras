@@ -1,4 +1,6 @@
+import io
 import os
+import shutil
 import zipfile
 
 from absl import logging
@@ -95,7 +97,7 @@ def save_model(model, filepath, overwrite=True, zipped=None, **kwargs):
 
     # If file exists and should not be overwritten.
     try:
-        exists = (not is_hf) and os.path.exists(filepath)
+        exists = (not is_hf) and file_utils.exists(filepath)
     except TypeError:
         exists = False
     if exists and not overwrite:
@@ -126,8 +128,9 @@ def load_model(filepath, custom_objects=None, compile=True, safe_mode=True):
     """Loads a model saved via `model.save()` or from an Orbax checkpoint.
 
     Args:
-        filepath: `str` or `pathlib.Path` object, path to the saved model file
-            or Orbax checkpoint directory.
+        filepath: `str`, `pathlib.Path`, or `io.IOBase` object, path to the
+            saved model file or Orbax checkpoint directory, or a file-like
+            object (e.g. `io.BytesIO`) from which to load the `.keras` model.
         custom_objects: Optional dictionary mapping names
             (strings) to custom classes or functions to be
             considered during deserialization.
@@ -157,6 +160,13 @@ def load_model(filepath, custom_objects=None, compile=True, safe_mode=True):
     It is recommended that you use layer attributes to
     access specific variables, e.g. `model.get_layer("dense_1").kernel`.
     """
+    if isinstance(filepath, io.IOBase):
+        return saving_lib.load_model(
+            filepath,
+            custom_objects=custom_objects,
+            compile=compile,
+            safe_mode=safe_mode,
+        )
     is_keras_zip = str(filepath).endswith(".keras") and zipfile.is_zipfile(
         filepath
     )
@@ -165,69 +175,73 @@ def load_model(filepath, custom_objects=None, compile=True, safe_mode=True):
     )
     is_hf = str(filepath).startswith("hf://")
 
-    # Support for remote zip files
-    if (
-        file_utils.is_remote_path(filepath)
-        and not file_utils.isdir(filepath)
-        and not is_keras_zip
-        and not is_hf
-    ):
-        local_path = file_utils.join(
-            saving_lib.get_temp_dir(), os.path.basename(filepath)
-        )
+    tmp_dir = None
+    try:
+        # Support for remote zip files
+        if (
+            file_utils.is_remote_path(filepath)
+            and not file_utils.isdir(filepath)
+            and not is_keras_zip
+            and not is_hf
+        ):
+            tmp_dir = saving_lib.get_temp_dir()
+            local_path = file_utils.join(tmp_dir, os.path.basename(filepath))
 
-        # Copy from remote to temporary local directory
-        file_utils.copy(filepath, local_path)
+            # Copy from remote to temporary local directory
+            file_utils.copy(filepath, local_path)
 
-        # Switch filepath to local zipfile for loading model
-        if zipfile.is_zipfile(local_path):
-            filepath = local_path
-            is_keras_zip = True
+            # Switch filepath to local zipfile for loading model
+            if zipfile.is_zipfile(local_path):
+                filepath = local_path
+                is_keras_zip = True
 
-    if is_keras_zip or is_keras_dir or is_hf:
-        return saving_lib.load_model(
-            filepath,
-            custom_objects=custom_objects,
-            compile=compile,
-            safe_mode=safe_mode,
-        )
-    if str(filepath).endswith((".h5", ".hdf5")):
-        return legacy_h5_format.load_model_from_hdf5(
-            filepath,
-            custom_objects=custom_objects,
-            compile=compile,
-            safe_mode=safe_mode,
-        )
+        if is_keras_zip or is_keras_dir or is_hf:
+            return saving_lib.load_model(
+                filepath,
+                custom_objects=custom_objects,
+                compile=compile,
+                safe_mode=safe_mode,
+            )
+        if str(filepath).endswith((".h5", ".hdf5")):
+            return legacy_h5_format.load_model_from_hdf5(
+                filepath,
+                custom_objects=custom_objects,
+                compile=compile,
+                safe_mode=safe_mode,
+            )
 
-    # Check for Orbax checkpoint directory using utility function
-    if is_orbax_checkpoint(filepath):
-        return _load_model_from_orbax_checkpoint(
-            filepath,
-            custom_objects=custom_objects,
-            compile=compile,
-            safe_mode=safe_mode,
-        )
+        # Check for Orbax checkpoint directory using utility function
+        if is_orbax_checkpoint(filepath):
+            return _load_model_from_orbax_checkpoint(
+                filepath,
+                custom_objects=custom_objects,
+                compile=compile,
+                safe_mode=safe_mode,
+            )
 
-    elif str(filepath).endswith(".keras"):
-        raise ValueError(
-            f"File not found: filepath={filepath}. "
-            "Please ensure the file is an accessible `.keras` "
-            "zip file."
-        )
-    else:
-        raise ValueError(
-            f"File format not supported: filepath={filepath}. "
-            "Keras 3 only supports V3 `.keras` files, "
-            "legacy H5 format files (`.h5` extension). "
-            "Note that the legacy SavedModel format is not "
-            "supported by `load_model()` in Keras 3. In "
-            "order to reload a TensorFlow SavedModel as an "
-            "inference-only layer in Keras 3, use "
-            "`keras.layers.TFSMLayer("
-            f"{filepath}, call_endpoint='serving_default')` "
-            "(note that your `call_endpoint` "
-            "might have a different name)."
-        )
+        elif str(filepath).endswith(".keras"):
+            raise ValueError(
+                f"File not found: filepath={filepath}. "
+                "Please ensure the file is an accessible `.keras` "
+                "zip file."
+            )
+        else:
+            raise ValueError(
+                f"File format not supported: filepath={filepath}. "
+                "Keras 3 only supports V3 `.keras` files, "
+                "legacy H5 format files (`.h5` extension). "
+                "Note that the legacy SavedModel format is not "
+                "supported by `load_model()` in Keras 3. In "
+                "order to reload a TensorFlow SavedModel as an "
+                "inference-only layer in Keras 3, use "
+                "`keras.layers.TFSMLayer("
+                f"{filepath}, call_endpoint='serving_default')` "
+                "(note that your `call_endpoint` "
+                "might have a different name)."
+            )
+    finally:
+        if tmp_dir is not None:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @keras_export("keras.saving.save_weights")
@@ -248,7 +262,7 @@ def save_weights(
             f"specified. Received: filepath={filepath_str}"
         )
     try:
-        exists = os.path.exists(filepath)
+        exists = file_utils.exists(filepath)
     except TypeError:
         exists = False
     if exists and not overwrite:

@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 import tensorflow as tf
 import torch
+from packaging.version import parse as parse_version
 
 from keras.src import backend
 from keras.src import layers
@@ -32,6 +33,17 @@ with _preserve_jax_x64_state():
 
 def _has_litert_torch():
     return _HAS_LITERT_TORCH
+
+
+def _litert_torch_version():
+    """Return parsed Version or None."""
+    if not _HAS_LITERT_TORCH:
+        return None
+    version = getattr(litert_torch, "__version__", "0.0.0")
+    try:
+        return parse_version(version)
+    except Exception:
+        return None
 
 
 def _get_interpreter(filepath):
@@ -71,7 +83,7 @@ class LiteRTTorchExportTest(testing.TestCase):
         if filepath is None:
             filepath = os.path.join(self.get_temp_dir(), "model.tflite")
 
-        keras_output = backend.convert_to_numpy(model(ref_input))
+        keras_output = backend.ops.convert_to_numpy(model(ref_input))
 
         model.export(filepath, format="litert", **export_kwargs)
         self.assertTrue(os.path.exists(filepath))
@@ -157,7 +169,7 @@ class LiteRTTorchExportTest(testing.TestCase):
         keras_outs = model(x)
         if not isinstance(keras_outs, (list, tuple)):
             keras_outs = [keras_outs]
-        keras_outs = [backend.convert_to_numpy(o) for o in keras_outs]
+        keras_outs = [backend.ops.convert_to_numpy(o) for o in keras_outs]
 
         model.export(tflite_path, format="litert")
         self.assertTrue(os.path.exists(tflite_path))
@@ -191,12 +203,12 @@ class LiteRTTorchExportTest(testing.TestCase):
         model.export(pt2_path, format="torch")
 
         x_np = np.random.normal(size=(1, 10)).astype("float32")
-        keras_out = backend.convert_to_numpy(model(x_np))
+        keras_out = backend.ops.convert_to_numpy(model(x_np))
 
         program = torch.export.load(pt2_path)
         module = program.module()
         device = next(module.parameters()).device
-        pt2_out = backend.convert_to_numpy(
+        pt2_out = backend.ops.convert_to_numpy(
             module(torch.tensor(x_np, device=device))
         )
 
@@ -217,12 +229,12 @@ class LiteRTTorchExportTest(testing.TestCase):
         model.export(tflite_path, format="litert")
 
         x_np = np.random.normal(size=(1, 10)).astype("float32")
-        keras_out = backend.convert_to_numpy(model(x_np))
+        keras_out = backend.ops.convert_to_numpy(model(x_np))
 
         program = torch.export.load(pt2_path)
         module = program.module()
         device = next(module.parameters()).device
-        pt2_out = backend.convert_to_numpy(
+        pt2_out = backend.ops.convert_to_numpy(
             module(torch.tensor(x_np, device=device))
         )
 
@@ -259,7 +271,7 @@ class LiteRTTorchExportTest(testing.TestCase):
 
         # Verify inference still works post-quantization
         x_np = np.random.normal(size=(1, 10)).astype("float32")
-        keras_out = backend.convert_to_numpy(model(x_np))
+        keras_out = backend.ops.convert_to_numpy(model(x_np))
         litert_out = _run_litert_inference(_get_interpreter(path), [x_np])
 
         # Quantized model has reduced precision
@@ -430,7 +442,7 @@ class LiteRTTorchExportTest(testing.TestCase):
 
         # Verify inference works
         x_np = np.random.normal(size=(1, 5)).astype("float32")
-        keras_out = backend.convert_to_numpy(model(x_np))
+        keras_out = backend.ops.convert_to_numpy(model(x_np))
         litert_out = _run_litert_inference(_get_interpreter(path), [x_np])
         self.assertAllClose(keras_out, litert_out, atol=self.LITERT_ATOL)
 
@@ -498,6 +510,62 @@ class LiteRTTorchExportTest(testing.TestCase):
 
         # Verify inference
         x_np = np.random.normal(size=(1, 5)).astype("float32")
-        keras_out = backend.convert_to_numpy(model(x_np))
+        keras_out = backend.ops.convert_to_numpy(model(x_np))
         litert_out = _run_litert_inference(_get_interpreter(path), [x_np])
         self.assertAllClose(keras_out, litert_out, atol=1e-4)
+
+    @pytest.mark.skipif(
+        _litert_torch_version() is not None
+        and _litert_torch_version() <= parse_version("0.9.1"),
+        reason="Dict input names are only preserved in litert-torch > 0.9.1",
+    )
+    def test_dict_input_names_preserved(self):
+        """Dict input keys are preserved in the TFLite signature.
+
+        Regression test for https://github.com/google-ai-edge/litert-torch/issues/1022
+        """
+
+        input_x = layers.Input(shape=(10,), name="x")
+        input_y = layers.Input(shape=(10,), name="y")
+        output = layers.Add()([input_x, input_y])
+        model = models.Model(
+            inputs={"x": input_x, "y": input_y}, outputs=output
+        )
+
+        x = np.random.normal(size=(1, 10)).astype("float32")
+        y = np.random.normal(size=(1, 10)).astype("float32")
+        keras_out = backend.ops.convert_to_numpy(model({"x": x, "y": y}))
+
+        path = os.path.join(self.get_temp_dir(), "dict_inputs.tflite")
+        model.export(path, format="litert")
+        self.assertTrue(os.path.exists(path))
+
+        interpreter = _get_interpreter(path)
+
+        # Verify inference works.
+        input_details = interpreter.get_input_details()
+        self.assertEqual(len(input_details), 2)
+        for d, arr in zip(input_details, [x, y]):
+            interpreter.set_tensor(d["index"], arr)
+        interpreter.invoke()
+        output_details = interpreter.get_output_details()
+        litert_out = interpreter.get_tensor(output_details[0]["index"])
+        self.assertAllClose(keras_out, litert_out, atol=self.LITERT_ATOL)
+
+        # Verify signature inputs contain the original dict keys and are not
+        # the old generic args_0 / args_1 names.
+        signature_inputs = interpreter.get_signature_list()["serving_default"][
+            "inputs"
+        ]
+        self.assertNotIn("args_0", signature_inputs)
+        self.assertNotIn("args_1", signature_inputs)
+        self.assertTrue(
+            any("x" in name for name in signature_inputs),
+            "Expected a signature input containing 'x', got "
+            f"{signature_inputs}",
+        )
+        self.assertTrue(
+            any("y" in name for name in signature_inputs),
+            "Expected a signature input containing 'y', got "
+            f"{signature_inputs}",
+        )

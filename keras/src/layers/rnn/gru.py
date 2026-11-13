@@ -10,6 +10,7 @@ from keras.src.layers.input_spec import InputSpec
 from keras.src.layers.layer import Layer
 from keras.src.layers.rnn.dropout_rnn_cell import DropoutRNNCell
 from keras.src.layers.rnn.rnn import RNN
+from keras.src.utils import argument_validation
 
 
 @keras_export("keras.layers.GRUCell")
@@ -104,11 +105,7 @@ class GRUCell(Layer, DropoutRNNCell):
         seed=None,
         **kwargs,
     ):
-        if units <= 0:
-            raise ValueError(
-                "Received an invalid value for argument `units`, "
-                f"expected a positive integer, got {units}."
-            )
+        units = argument_validation.validate_int("units", units, min_value=1)
         implementation = kwargs.pop("implementation", 2)
         super().__init__(**kwargs)
         self.implementation = implementation
@@ -533,7 +530,7 @@ class GRU(RNN):
         self.use_cudnn = use_cudnn
         if (
             backend.backend() == "tensorflow"
-            and backend.cudnn_ok(
+            and backend.rnn.cudnn_ok(
                 cell.activation,
                 cell.recurrent_activation,
                 self.unroll,
@@ -552,6 +549,14 @@ class GRU(RNN):
         if self.use_cudnn in ("auto", True):
             if not self.recurrent_dropout:
                 try:
+                    # Clone hidden state for PyTorch + stateful. The optimized
+                    # kernel retains the initial state for backward, while
+                    # Keras then assign()s the new state in-place (copy_),
+                    # which would mutate storage autograd still needs. The
+                    # generic RNN loop already clones inside step(); this
+                    # path bypasses that copy.
+                    if self.stateful and backend.backend() == "torch":
+                        initial_state = ops.copy(initial_state)
                     if training and self.dropout:
                         dp_mask = self.cell.get_dropout_mask(sequences[:, 0, :])
                         dp_mask = ops.expand_dims(dp_mask, axis=1)
@@ -565,7 +570,7 @@ class GRU(RNN):
                     # implementation of the inner GRU loop. In the case of
                     # TF for instance, it will leverage cuDNN when feasible, and
                     # it will raise NotImplementedError otherwise.
-                    out = backend.gru(
+                    out = backend.rnn.gru(
                         dp_sequences,
                         initial_state,
                         mask,

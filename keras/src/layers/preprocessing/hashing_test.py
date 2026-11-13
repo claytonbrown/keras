@@ -10,6 +10,7 @@ from keras.src import layers
 from keras.src import models
 from keras.src import testing
 from keras.src.saving import load_model
+from keras.src.testing.test_utils import named_product
 
 
 class ArrayLike:
@@ -35,25 +36,25 @@ class HashingTest(testing.TestCase):
         layer = layers.Hashing(num_bins=3)
         inp = [["A"], ["B"], ["C"], ["D"], ["E"]]
         output = layer(inp)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([[1], [0], [1], [1], [2]]))
 
         layer = layers.Hashing(num_bins=3, mask_value="")
         inp = [["A"], ["B"], [""], ["C"], ["D"]]
         output = layer(inp)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([[1], [1], [0], [2], [2]]))
 
         layer = layers.Hashing(num_bins=3, salt=[133, 137])
         inp = [["A"], ["B"], ["C"], ["D"], ["E"]]
         output = layer(inp)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([[1], [2], [1], [0], [2]]))
 
         layer = layers.Hashing(num_bins=3, salt=133)
         inp = [["A"], ["B"], ["C"], ["D"], ["E"]]
         output = layer(inp)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, np.array([[0], [0], [2], [1], [0]]))
 
     def test_tf_data_compatibility(self):
@@ -237,17 +238,31 @@ class HashingTest(testing.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be `None`"):
             _ = layers.Hashing(num_bins=-1)
         with self.assertRaisesRegex(
-            ValueError, "can only be a tuple of size 2"
+            TypeError, "Expected `salt` to be an integer"
         ):
             _ = layers.Hashing(num_bins=2, salt="string")
         with self.assertRaisesRegex(
-            ValueError, "can only be a tuple of size 2"
+            ValueError, "Expected `salt` to have 2 elements"
         ):
             _ = layers.Hashing(num_bins=2, salt=[1])
         with self.assertRaisesRegex(
-            ValueError, "can only be a tuple of size 2"
+            ValueError, "Expected `salt` to have 2 elements"
         ):
             _ = layers.Hashing(num_bins=1, salt=[133, 137, 177])
+
+    @parameterized.named_parameters(
+        named_product(
+            mode=("int", "one_hot", "multi_hot", "count"),
+            input_shape=((4,), (4, 1), (3, 4)),
+        )
+    )
+    def test_compute_output_shape(self, mode, input_shape):
+        # `compute_output_shape` must work without building the layer first
+        # and agree with the actual call for every output mode.
+        layer = layers.Hashing(num_bins=5, output_mode=mode)
+        cos = tuple(layer.compute_output_shape((None,) + input_shape))
+        actual = tuple(layer(layers.Input(shape=input_shape)).shape)
+        self.assertEqual(cos, actual)
 
     def test_one_hot_output(self):
         input_array = np.array([0, 1, 2, 3, 4])
@@ -430,6 +445,12 @@ class HashingTest(testing.TestCase):
             ValueError, "`sparse` may only be true if `output_mode` is"
         ):
             layers.Hashing(num_bins=3, output_mode="int", sparse=True)
+
+    def test_numpy_integer_salt(self):
+        layer = layers.Hashing(num_bins=3, salt=np.int64(133))
+        self.assertEqual(layer.salt, [133, 133])
+        for value in layer.salt:
+            self.assertIs(type(value), int)
 
 
 # TODO: support tf.RaggedTensor.

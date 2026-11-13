@@ -16,7 +16,7 @@ class SimpleRNNTest(testing.TestCase):
             expected_num_trainable_weights=3,
             expected_num_non_trainable_weights=0,
             expected_num_non_trainable_variables=1,
-            supports_masking=True,
+            supports_masking=False,
         )
         self.run_layer_test(
             layers.SimpleRNN,
@@ -32,8 +32,21 @@ class SimpleRNNTest(testing.TestCase):
             expected_num_losses=3,
             expected_num_trainable_weights=3,
             expected_num_non_trainable_weights=0,
-            supports_masking=True,
+            supports_masking=False,
         )
+
+    def test_seed_is_serialized(self):
+        layer = layers.SimpleRNN(3, dropout=0.5, seed=1337)
+        self.assertEqual(layer.get_config()["seed"], 1337)
+
+        # Without the seed in the config the restored layer draws a different
+        # dropout mask, so an identically configured model stops reproducing.
+        x = np.random.random((2, 4, 3))
+        restored = layers.SimpleRNN.from_config(layer.get_config())
+        layer.build(x.shape)
+        restored.build(x.shape)
+        restored.set_weights(layer.get_weights())
+        self.assertAllClose(layer(x, training=True), restored(x, training=True))
 
     def test_correctness(self):
         sequence = np.arange(24).reshape((2, 3, 4)).astype("float32")
@@ -307,3 +320,10 @@ class SimpleRNNTest(testing.TestCase):
             tpu_atol=1e-3,
             tpu_rtol=1e-3,
         )
+
+    def test_numpy_integer_units(self):
+        layer = layers.SimpleRNN(np.int64(3))
+        self.assertIs(type(layer.units), int)
+        self.assertEqual(layer.units, 3)
+        output = layer(np.ones((2, 4, 5), dtype="float32"))
+        self.assertEqual(output.shape, (2, 3))

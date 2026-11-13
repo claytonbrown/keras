@@ -1,10 +1,10 @@
 import numpy as np
 from absl.testing import parameterized
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class RandomRotationTest(testing.TestCase):
@@ -46,7 +46,9 @@ class RandomRotationTest(testing.TestCase):
         ).reshape(input_shape)
 
         self.assertAllClose(
-            backend.convert_to_tensor(expected_output), actual_output, atol=1e-5
+            backend.ops.convert_to_tensor(expected_output),
+            actual_output,
+            atol=1e-5,
         )
 
     def test_training_false(self):
@@ -63,7 +65,7 @@ class RandomRotationTest(testing.TestCase):
         input_image = np.reshape(np.arange(0, 25), input_shape)
         layer = layers.RandomRotation(factor=(0.5, 0.5))
 
-        ds = tf_data.Dataset.from_tensor_slices(input_image).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_image).map(layer)
         expected_output = np.asarray(
             [
                 [24, 23, 22, 21, 20],

@@ -1,11 +1,11 @@
 import grain
 import numpy as np
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import testing
 from keras.src.layers.preprocessing.data_layer import DataLayer
 from keras.src.random import SeedGenerator
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class RandomRGBToHSVLayer(DataLayer):
@@ -16,7 +16,7 @@ class RandomRGBToHSVLayer(DataLayer):
         self.generator = SeedGenerator(seed)
 
     def call(self, inputs):
-        images_shape = self.backend.shape(inputs)
+        images_shape = self.backend.ops.shape(inputs)
         batch_size = 1 if len(images_shape) == 3 else images_shape[0]
         seed = self._get_seed_generator(self.backend._backend)
 
@@ -26,10 +26,10 @@ class RandomRGBToHSVLayer(DataLayer):
             maxval=1.0,
             seed=seed,
         )
-        hsv_images = self.backend.image.rgb_to_hsv(
+        hsv_images = self.backend.ops.image.rgb_to_hsv(
             inputs, data_format=self.data_format
         )
-        return self.backend.numpy.where(
+        return self.backend.ops.numpy.where(
             probability[:, None, None, None] > 0.5, hsv_images, inputs
         )
 
@@ -69,7 +69,7 @@ class DataLayerTest(testing.TestCase):
             input_data = np.random.random((2, 3, 8, 8)).astype("float32")
         layer = RandomRGBToHSVLayer(data_format=data_format, seed=1337)
 
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         for output in ds.take(1):
             self.assertDType(output, "float32")
             self.assertEqual(list(output.shape), list(input_data.shape))

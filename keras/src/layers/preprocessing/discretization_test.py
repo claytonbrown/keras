@@ -1,17 +1,20 @@
 import os
 
-import grain
 import numpy as np
 import pytest
 from absl.testing import parameterized
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import models
 from keras.src import testing
+from keras.src.backend.common import KerasTensor
+from keras.src.backend.common import is_int_dtype
+from keras.src.backend.common import standardize_dtype
 from keras.src.saving import saving_api
 from keras.src.testing.test_utils import named_product
+from keras.src.trainers.data_adapters.py_dataset_adapter import PyDataset
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class DiscretizationTest(testing.TestCase):
@@ -70,6 +73,7 @@ class DiscretizationTest(testing.TestCase):
         self.assertLen(layer.bin_boundaries, 2)
 
     def test_adapt_with_grain_dataset(self):
+        grain = pytest.importorskip("grain")
         raw = np.random.uniform(0, 10, size=(100,)).astype("float32")
 
         class Source(grain.sources.RandomAccessDataSource):
@@ -152,7 +156,7 @@ class DiscretizationTest(testing.TestCase):
         )
         output = layer(input_array)
         self.assertSparse(output, sparse)
-        self.assertTrue(backend.is_tensor(output))
+        self.assertTrue(backend.ops.is_tensor(output))
         self.assertAllClose(output, expected_output)
 
     def test_tf_data_compatibility(self):
@@ -162,7 +166,7 @@ class DiscretizationTest(testing.TestCase):
         )
         x = np.array([[-1.0, 0.0, 0.1, 0.2, 0.4, 0.5, 1.0, 1.2, 0.98]])
         self.assertAllClose(layer(x), np.array([[0, 1, 1, 1, 2, 3, 4, 4, 3]]))
-        ds = tf_data.Dataset.from_tensor_slices(x).batch(1).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(x).batch(1).map(layer)
         for output in ds.take(1):
             output = output.numpy()
         self.assertAllClose(output, np.array([[0, 1, 1, 1, 2, 3, 4, 4, 3]]))
@@ -173,7 +177,7 @@ class DiscretizationTest(testing.TestCase):
             np.random.random((32, 3)),
         )
         x = np.array([[0.0, 0.1, 0.3]])
-        ds = tf_data.Dataset.from_tensor_slices(x).batch(1).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(x).batch(1).map(layer)
         for output in ds.take(1):
             output.numpy()
 
@@ -274,10 +278,10 @@ class DiscretizationTest(testing.TestCase):
         # Check consistency
         self.assertAllClose(model_call_output, predict_output)
         self.assertEqual(
-            backend.standardize_dtype(model_call_output.dtype),
-            backend.standardize_dtype(predict_output.dtype),
+            standardize_dtype(model_call_output.dtype),
+            standardize_dtype(predict_output.dtype),
         )
-        self.assertTrue(backend.is_int_dtype(model_call_output.dtype))
+        self.assertTrue(is_int_dtype(model_call_output.dtype))
 
     @parameterized.named_parameters(
         named_product(
@@ -404,7 +408,7 @@ class DiscretizationTest(testing.TestCase):
         )
 
         # Create a KerasTensor input
-        input_tensor = backend.KerasTensor(shape=(None, 3, 4), dtype="float32")
+        input_tensor = KerasTensor(shape=(None, 3, 4), dtype="float32")
 
         # Test compute_output_spec
         output_spec = layer.compute_output_spec(input_tensor)
@@ -520,3 +524,26 @@ class DiscretizationTest(testing.TestCase):
             expected_shape,
             f"Failed for num_bins={num_bins}, mode={output_mode}",
         )
+
+    @parameterized.parameters([("x",), ("x_and_y",), ("x_y_and_weights",)])
+    def test_adapt_pydataset_compat(self, pydataset_type):
+        class CustomDataset(PyDataset):
+            def __len__(self):
+                return 5
+
+            def __getitem__(self, idx):
+                x = np.random.uniform(0, 10, size=(20,))
+                y = np.random.randint(0, 2, size=(20,))
+                weights = np.ones((20,))
+                if pydataset_type == "x":
+                    return x
+                elif pydataset_type == "x_and_y":
+                    return x, y
+                elif pydataset_type == "x_y_and_weights":
+                    return x, y, weights
+                else:
+                    raise NotImplementedError(pydataset_type)
+
+        layer = layers.Discretization(num_bins=4)
+        layer.adapt(CustomDataset())
+        self.assertLen(layer.bin_boundaries, 3)

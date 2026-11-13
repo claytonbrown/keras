@@ -30,6 +30,7 @@ from keras.src.layers.core.input_layer import InputLayer
 from keras.src.layers.core.lambda_layer import Lambda
 from keras.src.layers.core.masking import Masking
 from keras.src.layers.core.reversible_embedding import ReversibleEmbedding
+from keras.src.layers.core.ternary_dense import TernaryDense
 from keras.src.layers.core.wrapper import Wrapper
 from keras.src.layers.input_spec import InputSpec
 from keras.src.layers.layer import Layer
@@ -115,6 +116,7 @@ from keras.src.layers.preprocessing.image_preprocessing.max_num_bounding_box imp
     MaxNumBoundingBoxes,
 )
 from keras.src.layers.preprocessing.image_preprocessing.mix_up import MixUp
+from keras.src.layers.preprocessing.image_preprocessing.mosaic import Mosaic
 from keras.src.layers.preprocessing.image_preprocessing.rand_augment import (
     RandAugment,
 )

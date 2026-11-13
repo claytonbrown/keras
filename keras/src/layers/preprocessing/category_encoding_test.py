@@ -1,10 +1,10 @@
 import numpy as np
 from absl.testing import parameterized
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 TEST_CASES = [{"testcase_name": "dense", "sparse": False}]
 if backend.SUPPORTS_SPARSE_TENSORS:
@@ -266,10 +266,25 @@ class CategoryEncodingTest(testing.TestCase):
                 [0, 1, 0, 0],
             ]
         )
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(4).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(4).map(layer)
         for output in ds.take(1):
             output = output.numpy()
         self.assertAllClose(output, expected_output)
+
+    @parameterized.named_parameters([("dense", False), ("sparse", True)])
+    def test_get_config(self, sparse):
+        layer = layers.CategoryEncoding(
+            num_tokens=4, output_mode="count", sparse=sparse
+        )
+        config = layer.get_config()
+        self.assertEqual(config["num_tokens"], 4)
+        self.assertEqual(config["output_mode"], "count")
+        self.assertEqual(config["sparse"], sparse)
+        revived_layer = layers.CategoryEncoding.from_config(config)
+        self.assertEqual(revived_layer.num_tokens, 4)
+        self.assertEqual(revived_layer.output_mode, "count")
+        self.assertEqual(revived_layer.sparse, sparse)
+        self.assertEqual(config, revived_layer.get_config())
 
     def test_category_encoding_without_num_tokens(self):
         with self.assertRaisesRegex(

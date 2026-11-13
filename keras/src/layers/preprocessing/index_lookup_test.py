@@ -2,13 +2,16 @@ import os
 
 import numpy as np
 import pytest
+import tensorflow as tf
 from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import models
+from keras.src import ops
 from keras.src import testing
 from keras.src.saving import saving_api
+from keras.src.trainers.data_adapters import py_dataset_adapter
 
 
 @pytest.mark.skipif(
@@ -342,9 +345,22 @@ class IndexLookupLayerTest(testing.TestCase):
         self.assertEqual(output_spec.shape, (None, 3, 4, 4))
         self.assertEqual(output_spec.dtype, backend.floatx())
 
+    @pytest.mark.skipif(
+        backend.backend() != "tensorflow",
+        reason="Sparse outputs are only supported with TensorFlow backend.",
+    )
     def test_sparse_outputs(self):
-        # TODO
-        pass
+        layer = layers.IntegerLookup(
+            vocabulary=[1, 2, 3],
+            output_mode="multi_hot",
+            sparse=True,
+        )
+        output = layer([[1, 2], [3, 4]])
+        self.assertEqual(ops.is_tensor(output), True)
+        self.assertIsInstance(output, tf.SparseTensor)
+        self.assertAllClose(
+            tf.sparse.to_dense(output), np.array([[0, 1, 1, 0], [1, 0, 0, 1]])
+        )
 
     def test_adapt_tf_idf(self):
         # Case: unbatched data
@@ -820,9 +836,13 @@ class IndexLookupLayerTest(testing.TestCase):
         layer = layers.IndexLookup(salt=99, **base_kwargs)
         self.assertEqual(layer.salt, [99, 99])
         # invalid formats
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(
+            TypeError, "Expected `salt` to be an integer"
+        ):
             layers.IndexLookup(salt="bad", **base_kwargs)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(
+            ValueError, "Expected `salt` to have 2 elements"
+        ):
             layers.IndexLookup(salt=[1, 2, 3], **base_kwargs)
 
     def test_salt_requires_farmhash(self):
@@ -860,3 +880,39 @@ class IndexLookupLayerTest(testing.TestCase):
                 np.array_equal(out_farmhash, out_siphash),
                 msg=f"Expected different outputs for dtype={dtype}",
             )
+
+    def test_adapt_pydataset_tuple_batches(self):
+        class CustomPyDataset(py_dataset_adapter.PyDataset):
+            def __len__(self):
+                return 2
+
+            def __getitem__(self, idx):
+                if idx == 0:
+                    return (["a", "b"], [0, 1])
+                return (["b", "c"], [1, 0])
+
+        layer = layers.StringLookup()
+        layer.adapt(CustomPyDataset())
+        vocab = layer.get_vocabulary()
+        self.assertIn("b", vocab)
+
+    def test_adapt_tf_dataset_with_labels(self):
+        ds = tf_data.Dataset.from_tensor_slices(
+            (["a", "b", "c"], [0, 1, 0])
+        ).batch(2)
+        layer = layers.StringLookup()
+        layer.adapt(ds)
+        vocab = layer.get_vocabulary()
+        self.assertIn("a", vocab)
+        self.assertIn("b", vocab)
+        self.assertIn("c", vocab)
+
+    def test_extract_batch(self):
+        from keras.src.layers.preprocessing.index_lookup import _extract_batch
+
+        self.assertEqual(_extract_batch((["a", "b"], [0, 1])), ["a", "b"])
+        self.assertEqual(
+            _extract_batch((["a", "b"], [0, 1], [0.5, 0.5])), ["a", "b"]
+        )
+        self.assertEqual(_extract_batch(["a", "b"]), ["a", "b"])
+        self.assertEqual(_extract_batch("single_str"), "single_str")

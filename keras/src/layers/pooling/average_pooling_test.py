@@ -1,9 +1,7 @@
 import numpy as np
-import pytest
 from absl.testing import parameterized
 from numpy.lib.stride_tricks import as_strided
 
-from keras.src import backend
 from keras.src import layers
 from keras.src import testing
 
@@ -109,7 +107,7 @@ def np_avgpool3d(x, pool_size, strides, padding, data_format):
         npad[1] = (0, h_padding)
         npad[2] = (0, w_padding)
         npad[3] = (0, d_padding)
-        x = np.pad(x, pad_width=npad, mode="symmetric")
+        x = np.pad(x, pad_width=npad, mode="edge")
 
     n_batch, h_x, w_x, d_x, ch_x = x.shape
     out_h = int((h_x - h_pool_size) / h_stride) + 1
@@ -272,10 +270,6 @@ class AveragePoolingCorrectnessTest(testing.TestCase):
         ((2,), (2,), "same", "channels_last"),
         ((2,), (2,), "same", "channels_first"),
     )
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="Same padding in Torch backend produces different results.",
-    )
     def test_average_pooling1d_same_padding(
         self, pool_size, strides, padding, data_format
     ):
@@ -316,10 +310,6 @@ class AveragePoolingCorrectnessTest(testing.TestCase):
         (2, (2, 1), "same", "channels_first"),
         ((2, 2), (2, 2), "same", "channels_last"),
         ((2, 2), (2, 2), "same", "channels_first"),
-    )
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="Same padding in Torch backend produces different results.",
     )
     def test_average_pooling2d_same_padding(
         self, pool_size, strides, padding, data_format
@@ -363,10 +353,6 @@ class AveragePoolingCorrectnessTest(testing.TestCase):
         (2, 1, "same", "channels_first"),
         ((2, 2, 2), (2, 2, 1), "same", "channels_last"),
         ((2, 2, 2), (2, 2, 1), "same", "channels_first"),
-    )
-    @pytest.mark.skipif(
-        backend.backend() == "torch",
-        reason="Same padding in Torch backend produces different results.",
     )
     def test_average_pooling3d_same_padding(
         self, pool_size, strides, padding, data_format

@@ -2,10 +2,19 @@ import numpy as np
 
 from keras.src import backend
 from keras.src.api_export import keras_export
+from keras.src.backend.common import KerasTensor
 from keras.src.layers.preprocessing.data_layer import DataLayer
 from keras.src.utils import argument_validation
 from keras.src.utils import numerical_utils
 from keras.src.utils.module_utils import tensorflow as tf
+from keras.src.utils.progbar import Progbar
+
+
+def _extract_batch(batch):
+    """Return input from batch; handle (x, y) or (x, y, sample_weight)."""
+    if isinstance(batch, (tuple, list)):
+        return batch[0]
+    return batch
 
 
 @keras_export("keras.layers.Discretization")
@@ -189,24 +198,39 @@ class Discretization(DataLayer):
             )
         self.reset_state()
         if isinstance(data, tf.data.Dataset):
+            if steps is None and hasattr(data, "cardinality"):
+                cardinality = data.cardinality()
+                if cardinality.numpy() not in (
+                    tf.data.UNKNOWN_CARDINALITY,
+                    tf.data.INFINITE_CARDINALITY,
+                ):
+                    steps = int(cardinality.numpy())
+
+            progbar = Progbar(target=steps, unit_name="step")
             if steps is not None:
                 data = data.take(steps)
-            for batch in data:
+            for i, batch in enumerate(data):
                 self.update_state(batch)
+                progbar.update(i + 1)
+            progbar.update(steps if steps is not None else i + 1, finalize=True)
         elif hasattr(data, "__iter__") and not (
             isinstance(data, np.ndarray)
-            or backend.is_tensor(data)
+            or backend.ops.is_tensor(data)
             or tf.is_tensor(data)
         ):
+            progbar = Progbar(target=steps, unit_name="step")
             for i, batch in enumerate(data):
                 if steps is not None and i >= steps:
                     break
                 self.update_state(batch)
+                progbar.update(i + 1)
+            progbar.update(steps if steps is not None else i + 1, finalize=True)
         else:
             self.update_state(data)
         self.finalize_state()
 
     def update_state(self, data):
+        data = _extract_batch(data)
         data = np.array(data).astype("float32")
         summary = summarize(data, self.epsilon)
         self.summary = merge_summaries(summary, self.summary, self.epsilon)
@@ -253,7 +277,7 @@ class Discretization(DataLayer):
 
     def compute_output_spec(self, inputs):
         output_shape = self.compute_output_shape(inputs.shape)
-        return backend.KerasTensor(shape=output_shape, dtype=self.output_dtype)
+        return KerasTensor(shape=output_shape, dtype=self.output_dtype)
 
     def load_own_variables(self, store):
         if len(store) == 1:
@@ -269,7 +293,7 @@ class Discretization(DataLayer):
                 "start using the `Discretization` layer."
             )
 
-        indices = self.backend.numpy.digitize(inputs, self.bin_boundaries)
+        indices = self.backend.ops.numpy.digitize(inputs, self.bin_boundaries)
         return numerical_utils.encode_categorical_inputs(
             indices,
             output_mode=self.output_mode,
@@ -333,8 +357,8 @@ def summarize(values, epsilon):
     elements = np.size(values)
     num_buckets = 1.0 / epsilon
     increment = elements / num_buckets
-    start = increment
     step = max(increment, 1)
+    start = step - 1
     boundaries = values[int(start) :: int(step)]
     weights = np.ones_like(boundaries)
     weights = weights * step

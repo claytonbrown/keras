@@ -538,6 +538,44 @@ class OrbaxCheckpointTest(testing.TestCase, parameterized.TestCase):
         with self.assertRaises(ValueError):
             saving.load_model(weights_only_dir)
 
+    @pytest.mark.requires_trainable_backend
+    def test_sequential_model_restores_saved_weights(self):
+        """Regression test for #23251: a Sequential model restored with
+        `load_model` must get the checkpointed weights and optimizer state,
+        not freshly initialized ones."""
+        utils.set_random_seed(123)
+        model = models.Sequential(
+            [
+                layers.Input((8,)),
+                layers.Dense(16, activation="relu"),
+                layers.Dense(1),
+            ]
+        )
+        model.compile(optimizer="adam", loss="mse")
+        x = np.random.randn(64, 8)
+        y = np.random.randn(64, 1)
+
+        checkpoint_dir = os.path.join(self.get_temp_dir(), "sequential")
+        callback = OrbaxCheckpoint(
+            directory=checkpoint_dir, save_on_background=False
+        )
+        model.fit(x, y, epochs=1, batch_size=16, callbacks=[callback])
+
+        loaded_model = saving.load_model(checkpoint_dir)
+
+        self.assertEqual(
+            [v.path for v in loaded_model.weights],
+            [v.path for v in model.weights],
+        )
+        for orig, loaded in zip(
+            model.get_weights(), loaded_model.get_weights()
+        ):
+            self.assertAllClose(orig, loaded)
+        for orig, loaded in zip(
+            model.optimizer.variables, loaded_model.optimizer.variables
+        ):
+            self.assertAllClose(orig, loaded)
+
     @parameterized.parameters(
         {"save_on_background": False},
         {"save_on_background": True},
@@ -570,7 +608,7 @@ class OrbaxCheckpointTest(testing.TestCase, parameterized.TestCase):
                 super().build(input_shape)
 
             def call(self, inputs):
-                return inputs @ self.kernel
+                return backend.ops.numpy.matmul(inputs, self.kernel)
 
         # Build model with both trainable and non-trainable variables
         inputs = layers.Input(shape=(10,), name="input_layer")
@@ -718,3 +756,35 @@ class OrbaxCheckpointTest(testing.TestCase, parameterized.TestCase):
             len(checkpoint_files_1),
             "Should have more checkpoint files",
         )
+
+    @pytest.mark.requires_trainable_backend
+    def test_warns_when_finalizing_checkpoints_fails(self):
+        """A failed finalize must not look like a successful save."""
+        checkpoint_dir = os.path.join(
+            self.get_temp_dir(), f"test_finalize_failure_{id(self)}"
+        )
+        model = models.Sequential(
+            [layers.Input((4,)), layers.Dense(3, name="dense")]
+        )
+        model.compile(optimizer="adam", loss="mse")
+        x = np.random.rand(8, 4)
+        y = np.random.rand(8, 3)
+
+        callback = OrbaxCheckpoint(directory=checkpoint_dir, save_freq="epoch")
+        model.fit(x, y, epochs=1, verbose=0, callbacks=[callback])
+
+        # `close()` is what raises when a pending save never lands, which is
+        # how a timed out async write reports itself.
+        class FailingCheckpointer:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+            def close(self):
+                raise TimeoutError("pending save did not complete")
+
+        callback.checkpointer = FailingCheckpointer(callback.checkpointer)
+        with self.assertWarnsRegex(UserWarning, "Failed to finalize"):
+            callback.on_train_end()

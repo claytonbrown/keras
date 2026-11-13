@@ -5,6 +5,7 @@ from keras.src import backend
 from keras.src import ops
 from keras.src import random
 from keras.src import testing
+from keras.src.backend.common import standardize_dtype
 from keras.src.random import seed_generator
 
 
@@ -18,7 +19,7 @@ class SeedGeneratorTest(testing.TestCase):
         self.assertEqual(ops.convert_to_numpy(gen.state)[0], seed)
 
         with self.assertRaisesRegex(
-            ValueError, "Argument `seed` must be an integer"
+            TypeError, "Expected `seed` to be an integer or `None`"
         ):
             seed_generator.SeedGenerator(seed="invalid_seed")
 
@@ -40,23 +41,25 @@ class SeedGeneratorTest(testing.TestCase):
 
     def test_seed_generator_dtype(self):
         gen = seed_generator.SeedGenerator(seed=42)
-        self.assertEqual(gen.state.dtype, backend.random_seed_dtype())
+        self.assertEqual(gen.state.dtype, backend.ops.random_seed_dtype())
         seed = gen.next()
-        self.assertEqual(gen.state.dtype, backend.random_seed_dtype())
+        self.assertEqual(gen.state.dtype, backend.ops.random_seed_dtype())
         self.assertEqual(
-            backend.standardize_dtype(seed.dtype), backend.random_seed_dtype()
+            standardize_dtype(seed.dtype),
+            backend.ops.random_seed_dtype(),
         )
 
     def test_draw_seed_from_seed_generator(self):
         gen = seed_generator.SeedGenerator(seed=42)
         seed1 = seed_generator.draw_seed(gen)
-        self.assertTrue(backend.is_tensor(seed1))
+        self.assertTrue(backend.ops.is_tensor(seed1))
 
     def test_draw_seed_from_integer(self):
         seed2 = seed_generator.draw_seed(12345)
-        self.assertTrue(backend.is_tensor(seed2))
+        self.assertTrue(backend.ops.is_tensor(seed2))
         self.assertEqual(
-            backend.standardize_dtype(seed2.dtype), backend.random_seed_dtype()
+            standardize_dtype(seed2.dtype),
+            backend.ops.random_seed_dtype(),
         )
 
     def test_draw_seed_from_large_integer(self):
@@ -64,10 +67,10 @@ class SeedGeneratorTest(testing.TestCase):
         # 2**31 is where signed-int32 wraps; 2**32 - 1 is the max uint32 value.
         for s in [2**31 - 1, 2**31, 2**32 - 1]:
             seed = seed_generator.draw_seed(s)
-            self.assertTrue(backend.is_tensor(seed))
+            self.assertTrue(backend.ops.is_tensor(seed))
             self.assertEqual(
-                backend.standardize_dtype(seed.dtype),
-                backend.random_seed_dtype(),
+                standardize_dtype(seed.dtype),
+                backend.ops.random_seed_dtype(),
             )
             # Verify the seed can be consumed by a random op without error.
             res = random.uniform((2, 2), seed=s)
@@ -75,7 +78,7 @@ class SeedGeneratorTest(testing.TestCase):
 
     def test_draw_seed_from_none(self):
         seed3 = seed_generator.draw_seed(None)
-        self.assertTrue(backend.is_tensor(seed3))
+        self.assertTrue(backend.ops.is_tensor(seed3))
 
     def test_draw_seed_invalid(self):
         with self.assertRaisesRegex(
@@ -108,3 +111,14 @@ class SeedGeneratorTest(testing.TestCase):
     def test_seed_generator_serialization(self):
         random_generator = seed_generator.SeedGenerator(seed=42, name="sg")
         self.run_class_serialization_test(random_generator)
+
+    def test_numpy_integer_seed(self):
+        gen = seed_generator.SeedGenerator(seed=np.int64(42))
+        self.assertIs(type(gen.get_config()["seed"]), int)
+        self.assertAllEqual(
+            gen.state, seed_generator.SeedGenerator(seed=42).state
+        )
+        self.assertAllEqual(
+            seed_generator.draw_seed(np.int64(42)),
+            seed_generator.draw_seed(42),
+        )

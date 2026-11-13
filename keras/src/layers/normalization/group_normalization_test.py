@@ -1,12 +1,12 @@
-import warnings
-
 import numpy as np
-import pytest
 
 from keras.src import constraints
+from keras.src import initializers
 from keras.src import layers
+from keras.src import ops
 from keras.src import regularizers
 from keras.src import testing
+from keras.src.backend.common import AutocastScope
 
 
 class GroupNormalizationTest(testing.TestCase):
@@ -73,11 +73,23 @@ class GroupNormalizationTest(testing.TestCase):
             _ = layer(inputs)
 
     def test_groups_rejects_invalid_values(self):
-        for bad in (0, -2, 1.5, "32"):
+        for bad in (0, -2):
             with self.assertRaisesRegex(ValueError, "argument `groups`"):
+                layers.GroupNormalization(groups=bad)
+        for bad in (1.5, "32"):
+            with self.assertRaisesRegex(
+                TypeError, "Expected `groups` to be an integer"
+            ):
                 layers.GroupNormalization(groups=bad)
         # `-1` is the documented sentinel for instance normalization.
         layers.GroupNormalization(groups=-1)
+
+    def test_epsilon_rejects_non_positive_values(self):
+        for bad in (None, 0, -1e-3):
+            with self.assertRaisesRegex(ValueError, "must be positive"):
+                layers.GroupNormalization(epsilon=bad)
+        # Boundary: a small positive epsilon is accepted.
+        layers.GroupNormalization(epsilon=1e-12)
 
     def test_groups_instance_norm(self):
         # GroupNormalization with groups=-1 will become InstanceNormalization
@@ -186,25 +198,40 @@ class GroupNormalizationTest(testing.TestCase):
             atol=1e-3,
         )
 
-    def test_warns_when_epsilon_too_small_for_compute_dtype(self):
-        with pytest.warns(UserWarning, match="epsilon"):
-            layers.GroupNormalization(
-                groups=2,
-                axis=-1,
-                scale=False,
-                center=False,
-                epsilon=1e-4,
-                dtype="mixed_bfloat16",
-            )
+    def test_large_value_within_autocast_scope(self):
+        layer = layers.GroupNormalization(groups=2)
+        layer.build((1, 2, 4))
+        # Use 70000 to trigger overflow for float16
+        large_value = ops.full(layer.gamma.shape, 70000)
+        with AutocastScope("float16"):
+            layer.gamma.assign(large_value)
+            self.assertAllClose(layer.gamma.value, large_value)
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            layers.GroupNormalization(
-                groups=2,
-                axis=-1,
-                scale=False,
-                center=False,
-                epsilon=1e-2,
-                dtype="mixed_bfloat16",
-            )
-            self.assertFalse(any("epsilon" in str(x.message) for x in w))
+    def test_mixed_precision_large_input_no_nan(self):
+        # Inputs above the float16 max (~65504) must not overflow to inf/nan
+        # before the float32 normalization runs. See issue #22586.
+        x = ops.full((2, 4, 8), 70000.0)
+        layer = layers.GroupNormalization(groups=2, dtype="mixed_float16")
+        out = ops.convert_to_numpy(layer(x))
+        self.assertFalse(np.any(np.isnan(out)))
+
+    def test_beta_preserved_for_large_constant_inputs(self):
+        x = ops.full((2, 1, 4), 1e10)
+        layer = layers.GroupNormalization(
+            groups=2,
+            scale=False,
+            beta_initializer=initializers.Constant(5.0),
+        )
+        self.assertAllClose(layer(x), ops.full((2, 1, 4), 5.0))
+
+        layer = layers.GroupNormalization(
+            groups=2,
+            gamma_initializer=initializers.Constant(3.0),
+            beta_initializer=initializers.Constant(5.0),
+        )
+        self.assertAllClose(layer(x), ops.full((2, 1, 4), 5.0))
+
+    def test_numpy_integer_groups(self):
+        layer = layers.GroupNormalization(groups=np.int64(2))
+        self.assertIs(type(layer.groups), int)
+        self.assertEqual(layer.groups, 2)

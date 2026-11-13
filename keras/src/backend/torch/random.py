@@ -2,10 +2,11 @@ import torch
 import torch._dynamo as dynamo
 import torch.nn.functional as tnn
 
+from keras.src.backend.common.backend_utils import canonicalize_axis
 from keras.src.backend.config import floatx
-from keras.src.backend.torch.core import convert_to_tensor
-from keras.src.backend.torch.core import get_device
-from keras.src.backend.torch.core import to_torch_dtype
+from keras.src.backend.torch.ops.core import convert_to_tensor
+from keras.src.backend.torch.ops.core import get_device
+from keras.src.backend.torch.ops.core import to_torch_dtype
 from keras.src.random.seed_generator import SeedGenerator
 from keras.src.random.seed_generator import draw_seed
 from keras.src.random.seed_generator import make_default_seed
@@ -137,6 +138,7 @@ def _get_concrete_noise_shape(inputs, noise_shape):
 
 
 def dropout(inputs, rate, noise_shape=None, seed=None):
+    inputs = convert_to_tensor(inputs)
     if rate == 1.0:
         return torch.zeros_like(inputs, device=get_device())
     if rate == 0.0:
@@ -176,6 +178,8 @@ def dropout(inputs, rate, noise_shape=None, seed=None):
 def shuffle(x, axis=0, seed=None):
     # Ref: https://github.com/pytorch/pytorch/issues/71409
     x = convert_to_tensor(x)
+
+    axis = canonicalize_axis(axis, x.ndim)
 
     # Get permutation indices
     # Do not use generator during symbolic execution.

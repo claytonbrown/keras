@@ -1,4 +1,5 @@
 import keras
+from keras.src import backend
 from keras.src import tree
 from keras.src.api_export import keras_export
 from keras.src.distillation.distillation_loss import _convert_loss_to_function
@@ -359,10 +360,10 @@ class Distiller(Model):
         else:
             return {"final_output": self.teacher(x, training=False)}
 
-    def _extract_all_student_features(self, x, y_pred):
+    def _extract_all_student_features(self, x, y_pred, training):
         """Extract all student features in a single forward pass."""
         if self._student_feature_extractor is not None:
-            return self._student_feature_extractor(x, training=True)
+            return self._student_feature_extractor(x, training=training)
         else:
             return {"final_output": y_pred}
 
@@ -444,20 +445,22 @@ class Distiller(Model):
             )
             flat_losses = tree.flatten(loss_values)
             student_loss = (
-                keras.ops.sum(keras.ops.stack(flat_losses))
+                backend.ops.numpy.sum(backend.ops.numpy.stack(flat_losses))
                 if len(flat_losses) > 1
                 else flat_losses[0]
             )
 
             # Ensure student_loss is a scalar
             if hasattr(student_loss, "shape") and len(student_loss.shape) > 0:
-                student_loss = keras.ops.mean(student_loss)
+                student_loss = backend.ops.numpy.mean(student_loss)
 
         # Compute distillation loss
         distillation_loss = 0.0
         if self.student_loss_weight < 1.0:
             teacher_features = self._extract_all_teacher_features(x)
-            student_features = self._extract_all_student_features(x, y_pred)
+            student_features = self._extract_all_student_features(
+                x, y_pred, training=training
+            )
 
             # Apply distillation losses using pre-extracted features
             for distillation_loss_fn, weight in zip(
@@ -529,16 +532,18 @@ class Distiller(Model):
                     )
 
                 # Apply weight and add to total
-                distillation_loss = keras.ops.add(
+                distillation_loss = backend.ops.numpy.add(
                     distillation_loss,
-                    keras.ops.multiply(weight, current_distillation_loss),
+                    backend.ops.numpy.multiply(
+                        weight, current_distillation_loss
+                    ),
                 )
 
         # Combine losses
-        total_loss = keras.ops.add(
-            keras.ops.multiply(self.student_loss_weight, student_loss),
-            keras.ops.multiply(
-                keras.ops.subtract(1.0, self.student_loss_weight),
+        total_loss = backend.ops.numpy.add(
+            backend.ops.numpy.multiply(self.student_loss_weight, student_loss),
+            backend.ops.numpy.multiply(
+                backend.ops.numpy.subtract(1.0, self.student_loss_weight),
                 distillation_loss,
             ),
         )

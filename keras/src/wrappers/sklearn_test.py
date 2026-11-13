@@ -3,12 +3,13 @@
 import unittest
 from contextlib import contextmanager
 
+import numpy as np
 import pytest
 import sklearn
 from packaging.version import parse as parse_version
 from sklearn.utils.estimator_checks import parametrize_with_checks
 
-import keras
+from keras.src import backend
 from keras.src.backend import floatx
 from keras.src.backend import set_floatx
 from keras.src.layers import Dense
@@ -155,7 +156,7 @@ def test_sklearn_estimator_checks(estimator, check):
     try:
         check(estimator)
     except Exception as exc:
-        if keras.config.backend() in ["numpy", "openvino"] and (
+        if not backend.SUPPORTS_GRADIENT and (
             isinstance(exc, NotImplementedError)
             or "NotImplementedError" in str(exc)
         ):
@@ -209,10 +210,33 @@ def test_sklearn_estimator_decision_function(estimator):
                 "decision_function and predict are inconsistent"
             )
     except Exception as exc:
-        if keras.config.backend() in ["numpy", "openvino"] and (
+        if not backend.SUPPORTS_GRADIENT and (
             isinstance(exc, NotImplementedError)
             or "NotImplementedError" in str(exc)
         ):
             pytest.xfail("Backend not implemented")
         else:
             raise
+
+
+@pytest.mark.requires_trainable_backend
+def test_sklearn_classifier_warm_start_reuses_model_instance():
+    inputs = Input(shape=(4,))
+    outputs = Dense(2, activation="softmax")(inputs)
+    model = Model(inputs, outputs)
+    model.compile(loss="categorical_crossentropy", optimizer="sgd")
+
+    X = np.ones((4, 4))
+    y = np.array([1, 2, 1, 2])
+    estimator = SKLearnClassifier(model=model, warm_start=True)
+
+    estimator.fit(X, y, epochs=0, verbose=0)
+    first_model = estimator.model_
+
+    if first_model is not model:
+        raise AssertionError("Expected warm_start to use the original model.")
+
+    estimator.fit(X, y, epochs=0, verbose=0)
+
+    if estimator.model_ is not first_model:
+        raise AssertionError("Expected warm_start to reuse the fitted model.")

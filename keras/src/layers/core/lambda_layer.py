@@ -4,6 +4,7 @@ import types
 from keras.src import backend
 from keras.src import tree
 from keras.src.api_export import keras_export
+from keras.src.backend.common import KerasTensor
 from keras.src.layers.layer import Layer
 from keras.src.saving import serialization_lib
 from keras.src.utils import python_utils
@@ -86,7 +87,7 @@ class Lambda(Layer):
             # Leverage backend shape inference
             try:
                 inputs = tree.map_shape_structure(
-                    lambda x: backend.KerasTensor(x, dtype=self.compute_dtype),
+                    lambda x: KerasTensor(x, dtype=self.compute_dtype),
                     input_shape,
                 )
                 output_spec = backend.compute_output_spec(self.call, inputs)
@@ -181,7 +182,16 @@ class Lambda(Layer):
 
     @classmethod
     def from_config(cls, config, custom_objects=None, safe_mode=None):
-        safe_mode = safe_mode or serialization_lib.in_safe_mode()
+        # When `safe_mode` is unset, fall back to the ambient deserialization
+        # scope, treating an unset scope as safe. This fails closed so that
+        # deserializing a `Lambda` outside of a `SafeModeScope` (e.g. a direct
+        # `from_config` call) does not silently allow arbitrary code execution.
+        effective_safe_mode = (
+            safe_mode
+            if safe_mode is not None
+            else serialization_lib.in_safe_mode()
+        )
+        safe_mode = effective_safe_mode is not False
         fn_config = config["function"]
         if (
             isinstance(fn_config, dict)

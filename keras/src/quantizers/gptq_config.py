@@ -1,17 +1,19 @@
+import numbers
+
 from keras.src.api_export import keras_export
 from keras.src.quantizers.quantization_config import QuantizationConfig
 
 
 @keras_export("keras.quantizers.GPTQConfig")
 class GPTQConfig(QuantizationConfig):
-    """Configuration class for the GPTQ (Gradient-based Post-Training
+    """Configuration class for the GPTQ (Accurate Post-Training
     Quantization) algorithm.
 
     GPTQ is a post-training quantization method that quantizes neural network
     weights to lower precision (e.g., 4-bit) while minimizing the impact on
-    model accuracy. It works by analyzing the Hessian matrix of the loss
-    function with respect to the weights and applying optimal quantization
-    that preserves the most important weight values.
+    model accuracy. It accumulates the Hessian of each layer's inputs over
+    calibration data and quantizes the weights one column at a time,
+    correcting the columns still to come for the error already made.
 
     **When to use GPTQ:**
     - You want to reduce model size and memory usage
@@ -120,6 +122,12 @@ class GPTQConfig(QuantizationConfig):
             Defaults to 4.
         num_samples: (int, optional) The number of calibration data samples to
             use from the dataset. Defaults to 128.
+        calibration_batch_size: (int, optional) The number of calibration
+            samples to run through each block per forward pass during
+            calibration. Larger values reduce the number of forward passes
+            (and therefore wall-clock calibration time) without changing the
+            quantization result, at the cost of higher peak activation memory.
+            Defaults to 8.
         sequence_length: (int, optional) The sequence length to use for each
             calibration sample. Defaults to 512.
         hessian_damping: (float, optional) The % of Hessian damping to use for
@@ -147,6 +155,7 @@ class GPTQConfig(QuantizationConfig):
         *,
         weight_bits: int = 4,
         num_samples: int = 128,
+        calibration_batch_size: int = 8,
         per_channel: bool = True,
         sequence_length: int = 512,
         hessian_damping: float = 0.01,
@@ -163,6 +172,15 @@ class GPTQConfig(QuantizationConfig):
             )
         if num_samples <= 0:
             raise ValueError("num_samples must be a positive integer.")
+        if (
+            isinstance(calibration_batch_size, bool)
+            or not isinstance(calibration_batch_size, numbers.Real)
+            or not float(calibration_batch_size).is_integer()
+            or calibration_batch_size < 1
+        ):
+            raise ValueError(
+                "calibration_batch_size must be a positive integer."
+            )
         if sequence_length <= 0:
             raise ValueError("sequence_length must be a positive integer.")
         if hessian_damping < 0 or hessian_damping > 1:
@@ -176,6 +194,7 @@ class GPTQConfig(QuantizationConfig):
         self.dataset = dataset
         self.tokenizer = tokenizer
         self.num_samples = num_samples
+        self.calibration_batch_size = int(calibration_batch_size)
         self.per_channel = per_channel
         self.sequence_length = sequence_length
         self.hessian_damping = hessian_damping
@@ -187,19 +206,22 @@ class GPTQConfig(QuantizationConfig):
 
     def get_config(self):
         return {
-            # Dataset and Tokenizer are only required for a one-time
-            # calibration and are not saved in the config.
+            # Dataset, tokenizer and quantization layer structure are only
+            # required for one-time calibration and are not saved in the
+            # config. The structure also holds references to live layer
+            # objects, which cannot be serialized.
             "dataset": None,
             "tokenizer": None,
+            "quantization_layer_structure": None,
             "weight_bits": self.weight_bits,
             "num_samples": self.num_samples,
+            "calibration_batch_size": self.calibration_batch_size,
             "per_channel": self.per_channel,
             "sequence_length": self.sequence_length,
             "hessian_damping": self.hessian_damping,
             "group_size": self.group_size,
             "symmetric": self.symmetric,
             "activation_order": self.activation_order,
-            "quantization_layer_structure": self.quantization_layer_structure,
         }
 
     @classmethod
@@ -214,6 +236,6 @@ class GPTQConfig(QuantizationConfig):
         """Returns the dtype policy string for this configuration.
 
         Returns:
-            A string representing the dtype policy, e.g. "gptq_4bit".
+            A string representing the dtype policy, e.g. "gptq/4/128".
         """
         return f"gptq/{self.weight_bits}/{self.group_size}"

@@ -1,11 +1,11 @@
 import numpy as np
 from absl.testing import parameterized
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import ops
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class RandomGrayscaleTest(testing.TestCase):
@@ -53,6 +53,20 @@ class RandomGrayscaleTest(testing.TestCase):
                 r, g, b = img[0], img[1], img[2]
                 self.assertTrue(np.allclose(r, g) and np.allclose(g, b))
 
+    def test_seed_is_serialized(self):
+        layer = layers.RandomGrayscale(
+            factor=0.5, data_format="channels_last", seed=1337
+        )
+        self.assertEqual(layer.get_config()["seed"], 1337)
+
+        # Without the seed in the config the restored layer grayscales a
+        # different subset of the batch.
+        images = np.random.random((8, 4, 4, 3)).astype("float32")
+        restored = layers.RandomGrayscale.from_config(layer.get_config())
+        self.assertAllClose(
+            layer(images, training=True), restored(images, training=True)
+        )
+
     def test_invalid_factor(self):
         with self.assertRaises(ValueError):
             layers.RandomGrayscale(factor=-0.1)
@@ -68,7 +82,7 @@ class RandomGrayscaleTest(testing.TestCase):
             input_data = np.random.random((2, 3, 8, 8)) * 255
 
         layer = layers.RandomGrayscale(factor=0.5, data_format=data_format)
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
 
         for output in ds.take(1):
             output_array = output.numpy()

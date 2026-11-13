@@ -1,3 +1,5 @@
+import numbers
+
 from keras.src.api_export import keras_export
 from keras.src.quantizers.quantization_config import QuantizationConfig
 
@@ -32,6 +34,15 @@ class AWQConfig(QuantizationConfig):
             only supports 4-bit quantization. Defaults to 4.
         num_samples: The number of calibration data samples to use from the
             dataset. Defaults to 128.
+        calibration_batch_size: The number of calibration samples to run
+            through each block per forward pass during calibration. Larger
+            values reduce the number of forward passes (and therefore
+            wall-clock calibration time) at the cost of higher peak
+            activation memory. Batching changes the order in which the
+            activation statistics accumulate, and because the scale and
+            clipping searches pick discrete grid points, some codes can
+            differ from calibrating one sample at a time. Set it to 1 to
+            reproduce one-sample-at-a-time results. Defaults to 8.
         sequence_length: The sequence length to use for each calibration
             sample. Defaults to 512.
         group_size: The size of weight groups to quantize together. A
@@ -40,6 +51,12 @@ class AWQConfig(QuantizationConfig):
         num_grid_points: The number of grid search points for finding optimal
             per-channel scales. Higher values may find better scales but
             take longer. Defaults to 20.
+        apply_clip: Whether to run the AutoAWQ-style weight clipping search
+            after the scale search. This grid-searches a per-group shrink
+            factor on the weight max and clips the (scaled) weights to the
+            value that minimizes activation-aware reconstruction error before
+            quantization. Improves accuracy at a small calibration cost.
+            Defaults to True.
         quantization_layer_structure: A dictionary defining the model's
             quantization structure. It should contain:
             - "pre_block_layers": list of layers to run before the first
@@ -76,9 +93,11 @@ class AWQConfig(QuantizationConfig):
         *,
         weight_bits: int = 4,
         num_samples: int = 128,
+        calibration_batch_size: int = 8,
         sequence_length: int = 512,
         group_size: int = 128,
         num_grid_points: int = 20,
+        apply_clip: bool = True,
         quantization_layer_structure: dict = None,
     ):
         super().__init__()
@@ -90,6 +109,15 @@ class AWQConfig(QuantizationConfig):
             )
         if num_samples <= 0:
             raise ValueError("num_samples must be a positive integer.")
+        if (
+            isinstance(calibration_batch_size, bool)
+            or not isinstance(calibration_batch_size, numbers.Real)
+            or not float(calibration_batch_size).is_integer()
+            or calibration_batch_size < 1
+        ):
+            raise ValueError(
+                "calibration_batch_size must be a positive integer."
+            )
         if sequence_length <= 0:
             raise ValueError("sequence_length must be a positive integer.")
         if group_size < -1 or group_size == 0:
@@ -104,9 +132,11 @@ class AWQConfig(QuantizationConfig):
         self.tokenizer = tokenizer
         self.weight_bits = weight_bits
         self.num_samples = num_samples
+        self.calibration_batch_size = int(calibration_batch_size)
         self.sequence_length = sequence_length
         self.group_size = group_size
         self.num_grid_points = num_grid_points
+        self.apply_clip = apply_clip
         self.quantization_layer_structure = quantization_layer_structure
 
     @property
@@ -123,16 +153,20 @@ class AWQConfig(QuantizationConfig):
 
     def get_config(self):
         return {
-            # Dataset and Tokenizer are only required for one-time
-            # calibration and are not saved in the config.
+            # Dataset, tokenizer and quantization layer structure are only
+            # required for one-time calibration and are not saved in the
+            # config. The structure also holds references to live layer
+            # objects, which cannot be serialized.
             "dataset": None,
             "tokenizer": None,
+            "quantization_layer_structure": None,
             "weight_bits": self.weight_bits,
             "num_samples": self.num_samples,
+            "calibration_batch_size": self.calibration_batch_size,
             "sequence_length": self.sequence_length,
             "group_size": self.group_size,
             "num_grid_points": self.num_grid_points,
-            "quantization_layer_structure": self.quantization_layer_structure,
+            "apply_clip": self.apply_clip,
         }
 
     @classmethod

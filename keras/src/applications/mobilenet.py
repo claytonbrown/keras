@@ -4,6 +4,7 @@ from keras.src import backend
 from keras.src import layers
 from keras.src.api_export import keras_export
 from keras.src.applications import imagenet_utils
+from keras.src.backend.common import is_keras_tensor
 from keras.src.models import Functional
 from keras.src.ops import operation_utils
 from keras.src.utils import file_utils
@@ -66,6 +67,8 @@ def MobileNet(
             `input_shape` will be ignored if the `input_tensor` is provided.
         alpha: Controls the width of the network. This is known as the width
             multiplier in the MobileNet paper.
+            When `weights` is `"imagenet"`, `alpha` can be one of `0.25`,
+            `0.50`, `0.75` or `1.0` only.
             - If `alpha < 1.0`, proportionally decreases the number
                 of filters in each layer.
             - If `alpha > 1.0`, proportionally increases the number
@@ -73,8 +76,9 @@ def MobileNet(
             - If `alpha == 1`, default number of filters from the paper
                 are used at each layer. Defaults to `1.0`.
         depth_multiplier: Depth multiplier for depthwise convolution.
-            This is called the resolution multiplier in the MobileNet paper.
-            Defaults to `1.0`.
+            It sets the number of depthwise filters for each input channel.
+            When `weights` is `"imagenet"`, `depth_multiplier` must be `1`.
+            Defaults to `1`.
         dropout: Dropout rate. Defaults to `0.001`.
         include_top: Boolean, whether to include the fully-connected layer
             at the top of the network. Defaults to `True`.
@@ -166,7 +170,7 @@ def MobileNet(
         if alpha not in [0.25, 0.50, 0.75, 1.0]:
             raise ValueError(
                 "If imagenet weights are being loaded, "
-                "alpha can be one of"
+                "alpha can be one of "
                 "`0.25`, `0.50`, `0.75` or `1.0` only.  "
                 f"Received alpha={alpha}"
             )
@@ -184,7 +188,7 @@ def MobileNet(
     if input_tensor is None:
         img_input = layers.Input(shape=input_shape)
     else:
-        if not backend.is_keras_tensor(input_tensor):
+        if not is_keras_tensor(input_tensor):
             img_input = layers.Input(tensor=input_tensor, shape=input_shape)
         else:
             img_input = input_tensor

@@ -1,9 +1,9 @@
 import numpy as np
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class RandomColorJitterTest(testing.TestCase):
@@ -51,10 +51,10 @@ class RandomColorJitterTest(testing.TestCase):
         layer = layers.RandomColorJitter(
             brightness_factor=[0.5, 0.5], seed=seed
         )
-        output = backend.convert_to_numpy(layer(inputs))
+        output = backend.ops.convert_to_numpy(layer(inputs))
 
         layer = layers.RandomBrightness(factor=[0.5, 0.5], seed=seed)
-        sub_output = backend.convert_to_numpy(layer(inputs))
+        sub_output = backend.ops.convert_to_numpy(layer(inputs))
 
         self.assertAllClose(output, sub_output)
 
@@ -128,6 +128,6 @@ class RandomColorJitterTest(testing.TestCase):
             hue_factor=0.1,
         )
 
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         for output in ds.take(1):
             output.numpy()

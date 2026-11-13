@@ -4,6 +4,9 @@ import operator
 import re
 import warnings
 
+from keras.src import tree
+from keras.src.backend.common.keras_tensor import KerasTensor
+
 
 def _convert_conv_transpose_padding_args_from_keras_to_jax(
     kernel_size, stride, dilation_rate, padding, output_padding
@@ -425,6 +428,8 @@ def to_tuple_or_list(value):
     """Convert the non-`None` value to either a tuple or a list."""
     if value is None:
         return value
+    if hasattr(value, "tolist"):  # e.g. numpy array or scalar
+        value = value.tolist()
     if not isinstance(value, (int, tuple, list)):
         raise ValueError(
             "`value` must be an integer, tuple or list. "
@@ -433,6 +438,27 @@ def to_tuple_or_list(value):
     if isinstance(value, int):
         return (value,)
     return value
+
+
+def normalize_shift_and_axis(shift, axis):
+    """Normalize `shift` and `axis` arguments of `roll` to the same length.
+
+    Mirrors numpy's behavior of broadcasting a scalar (or length-1
+    sequence) `shift`/`axis` against the other argument. Accepts ints,
+    lists, tuples, and array-likes (e.g. numpy arrays).
+    """
+    shifts = list(to_tuple_or_list(shift))
+    axes = list(to_tuple_or_list(axis))
+    if len(shifts) == 1:
+        shifts = shifts * len(axes)
+    if len(axes) == 1:
+        axes = axes * len(shifts)
+    if len(shifts) != len(axes):
+        raise ValueError(
+            "`shift` and `axis` must be broadcastable to the same length. "
+            f"Received: shift={shift}, axis={axis}"
+        )
+    return shifts, axes
 
 
 ### Code for ops.vectorize() used for TF and torch backends.
@@ -673,3 +699,44 @@ def compute_adaptive_pooling_window_sizes(input_dim, output_dim):
     small = math.ceil(input_dim / output_dim)
     big = small + 1
     return small, big
+
+
+def standardize_argnums(argnums, num_args):
+    """Validate `argnums` for `grad` and return a tuple of positions."""
+    if isinstance(argnums, int):
+        positions = (argnums,)
+    elif isinstance(argnums, (list, tuple)) and all(
+        isinstance(i, int) for i in argnums
+    ):
+        positions = tuple(argnums)
+    else:
+        raise TypeError(
+            "`argnums` must be an int or a tuple of ints. "
+            f"Received: argnums={argnums}"
+        )
+    for i in positions:
+        if i < -num_args or i >= num_args:
+            raise ValueError(
+                f"`argnums` refers to positional argument {i}, but the "
+                f"function was called with {num_args} positional arguments."
+            )
+    positions = tuple(i % num_args for i in positions)
+    if len(set(positions)) != len(positions):
+        raise ValueError(
+            f"`argnums` must not repeat a position. Received: argnums={argnums}"
+        )
+    return positions
+
+
+def empty_scan_ys_spec(compute_output_spec, f, init, xs):
+    """Traces one step of `f` for the `ys` specs of a zero length `scan`."""
+    init_spec = tree.map_structure(
+        lambda x: KerasTensor(x.shape, x.dtype), init
+    )
+    xs_spec = None
+    if xs is not None:
+        xs_spec = tree.map_structure(
+            lambda x: KerasTensor(x.shape[1:], x.dtype), xs
+        )
+    _, ys_spec = compute_output_spec(f, init_spec, xs_spec)
+    return ys_spec

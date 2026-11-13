@@ -5,9 +5,14 @@ from absl.testing import parameterized
 
 from keras.src import backend
 from keras.src import ops
+from keras.src.backend import config
 from keras.src.backend.common import dtypes
+from keras.src.backend.common import result_type
 from keras.src.testing import test_case
 from keras.src.testing.test_utils import named_product
+from keras.src.testing.test_utils import x64_mode_scope
+
+X64_SUPPORTED = backend.backend() in config._X64_BACKENDS
 
 
 class DtypesTest(test_case.TestCase):
@@ -38,30 +43,59 @@ class DtypesTest(test_case.TestCase):
     if not backend.SUPPORTS_COMPLEX_DTYPES:
         ALL_DTYPES = [x for x in ALL_DTYPES if x not in ("complex64",)]
 
+    # The 64-bit dtypes, kept under `x64_mode="explicit_x64"`.
+    X64_DTYPES = ["int64", "float64"]
+    if backend.backend() != "torch":  # No uint64 kernels in torch.
+        X64_DTYPES += ["uint64"]
+    if backend.SUPPORTS_COMPLEX_DTYPES:
+        X64_DTYPES += ["complex128"]
+    EXPLICIT_X64_DTYPES = ALL_DTYPES + X64_DTYPES
+
+    def assert_result_type_matches_jax(self, *dtypes):
+        """Checks `result_type` against `jnp.result_type` for tensor inputs."""
+        import jax.numpy as jnp
+
+        tensors = [ops.ones((1,), dtype=dtype) for dtype in dtypes]
+        jax_tensors = [jnp.ones((1,), dtype=dtype) for dtype in dtypes]
+        out = result_type(*(x.dtype for x in tensors))
+        self.assertEqual(out, jnp.result_type(*jax_tensors).name)
+
+    def assert_scalar_result_type_matches_jax(self, dtype, scalar_type):
+        """Checks `result_type` against `jnp.result_type` for a scalar type."""
+        import jax.numpy as jnp
+
+        out = result_type(dtype, scalar_type)
+        self.assertEqual(out, jnp.result_type(dtype, scalar_type).name)
+
     @parameterized.named_parameters(
         named_product(dtype1=ALL_DTYPES, dtype2=[bool, int, float])
     )
     def test_result_type_with_python_scalar_types(self, dtype1, dtype2):
-        import jax.numpy as jnp
-
-        out = backend.result_type(dtype1, dtype2)
-        expected = jnp.result_type(dtype1, dtype2).name
-        self.assertEqual(out, expected)
+        self.assert_scalar_result_type_matches_jax(dtype1, dtype2)
 
     @parameterized.named_parameters(
         named_product(dtype1=ALL_DTYPES, dtype2=ALL_DTYPES)
     )
     def test_result_type_with_tensor(self, dtype1, dtype2):
-        import jax.numpy as jnp
+        self.assert_result_type_matches_jax(dtype1, dtype2)
 
-        x1 = ops.ones((1,), dtype=dtype1)
-        x2 = ops.ones((1,), dtype=dtype2)
-        x1_jax = jnp.ones((1,), dtype=dtype1)
-        x2_jax = jnp.ones((1,), dtype=dtype2)
+    @parameterized.named_parameters(
+        named_product(dtype1=EXPLICIT_X64_DTYPES, dtype2=[bool, int, float])
+    )
+    @pytest.mark.skipif(not X64_SUPPORTED, reason="Unsupported backend.")
+    def test_result_type_with_python_scalar_types_explicit_x64(
+        self, dtype1, dtype2
+    ):
+        with x64_mode_scope("explicit_x64"):
+            self.assert_scalar_result_type_matches_jax(dtype1, dtype2)
 
-        out = backend.result_type(x1.dtype, x2.dtype)
-        expected = jnp.result_type(x1_jax, x2_jax).name
-        self.assertEqual(out, expected)
+    @parameterized.named_parameters(
+        named_product(dtype1=EXPLICIT_X64_DTYPES, dtype2=EXPLICIT_X64_DTYPES)
+    )
+    @pytest.mark.skipif(not X64_SUPPORTED, reason="Unsupported backend.")
+    def test_result_type_with_tensor_explicit_x64(self, dtype1, dtype2):
+        with x64_mode_scope("explicit_x64"):
+            self.assert_result_type_matches_jax(dtype1, dtype2)
 
     @parameterized.named_parameters(
         named_product(
@@ -83,7 +117,7 @@ class DtypesTest(test_case.TestCase):
         # https://github.com/keras-team/keras/issues/21677
         x1 = ops.ones((1,), dtype="int64")
         x2 = ops.ones((1,), dtype=dtype)
-        out = backend.result_type(x1.dtype, x2.dtype)
+        out = result_type(x1.dtype, x2.dtype)
         self.assertEqual(out, "int64")
 
     @parameterized.named_parameters(
@@ -110,16 +144,16 @@ class DtypesTest(test_case.TestCase):
         # https://github.com/keras-team/keras/issues/21677
         x1 = ops.ones((1,), dtype="float64")
         x2 = ops.ones((1,), dtype=dtype)
-        out = backend.result_type(x1.dtype, x2.dtype)
+        out = result_type(x1.dtype, x2.dtype)
         self.assertEqual(out, "float64")
 
     def test_result_type_with_none(self):
         import jax.numpy as jnp
 
-        self.assertEqual(backend.result_type(None), jnp.result_type(None).name)
+        self.assertEqual(result_type(None), jnp.result_type(None).name)
 
     def test_result_type_empty_list(self):
-        self.assertEqual(backend.result_type(), "float32")
+        self.assertEqual(result_type(), "float32")
 
     def test_respect_weak_type_for_bool(self):
         self.assertEqual(dtypes._respect_weak_type("bool", True), "bool")
@@ -284,8 +318,8 @@ class DtypesTest(test_case.TestCase):
         with self.assertRaisesRegex(
             ValueError, "There is no implicit conversions from float8 dtypes"
         ):
-            dtypes.result_type("float8_e4m3fn", "bfloat16")
+            result_type("float8_e4m3fn", "bfloat16")
         with self.assertRaisesRegex(
             ValueError, "There is no implicit conversions from float8 dtypes"
         ):
-            dtypes.result_type("float8_e5m2", "bfloat16")
+            result_type("float8_e5m2", "bfloat16")

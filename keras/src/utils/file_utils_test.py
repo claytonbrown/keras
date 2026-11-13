@@ -11,6 +11,7 @@ from absl.testing import parameterized
 
 from keras.src.testing import test_case
 from keras.src.utils import file_utils
+from keras.src.utils.module_utils import LazyModule
 
 
 class PathToStringTest(test_case.TestCase):
@@ -89,15 +90,22 @@ class IsLinkInDirTest(test_case.TestCase):
             {
                 "testcase_name": "hardlink_in",
                 "is_symlink": False,
-                "name": None,
+                "name": "file.txt",
                 "linkname": "file.txt",
                 "expected": True,
             },
             {
-                "testcase_name": "hardlink_out",
+                "testcase_name": "hardlink_target_out",
                 "is_symlink": False,
-                "name": None,
+                "name": "file.txt",
                 "linkname": "../file.txt",
+                "expected": False,
+            },
+            {
+                "testcase_name": "hardlink_name_out",
+                "is_symlink": False,
+                "name": "../file.txt",
+                "linkname": "file.txt",
                 "expected": False,
             },
             {
@@ -208,6 +216,20 @@ class FilterSafePathsTest(test_case.TestCase):
             self.assertTrue(
                 members[0].issym()
             )  # Explicitly assert it's a symbolic link.
+
+    def test_file_routed_through_symlink_is_rejected(self):
+        """A member routed through an in-bounds symlink via `..` is rejected."""
+        os.symlink(".", os.path.join(self.base_dir, "link"))
+        with tarfile.open(self.tar_path, "w") as tar:
+            tar.add(
+                self.target_path,
+                arcname=os.path.join("link", "..", "escaped.txt"),
+            )
+        with tarfile.open(self.tar_path, "r") as tar:
+            members = list(
+                file_utils.filter_safe_tarinfos(tar.getmembers(), self.base_dir)
+            )
+            self.assertEqual(members, [])
 
 
 class ExtractArchiveTest(test_case.TestCase):
@@ -455,6 +477,19 @@ class GetFileTest(test_case.TestCase):
         ):
             _ = file_utils.get_file("test.txt", origin, file_hash=hashval)
 
+    def test_get_file_with_unusable_origin_file_name(self):
+        """Test that an origin with no usable file name is rejected."""
+        cache_dir = self.get_temp_dir()
+        base = urllib.parse.urljoin(
+            "file://", urllib.request.pathname2url(os.path.abspath(cache_dir))
+        )
+
+        for origin in (f"{base}/", f"{base}/.", f"{base}/.."):
+            with self.assertRaisesRegex(
+                ValueError, "Can't parse the file name from the origin"
+            ):
+                _ = file_utils.get_file(origin=origin, cache_dir=cache_dir)
+
     def _create_tar_file(self, directory):
         """Helper function to create a tar file."""
         text_file_path = os.path.join(directory, "test.txt")
@@ -561,6 +596,10 @@ class GetFileTest(test_case.TestCase):
     def test_listdir(self):
         content = file_utils.listdir(self.temp_dir)
         self.assertIn("sample_file.txt", content)
+
+    def test_walk(self):
+        entries = list(file_utils.walk(self.temp_dir))
+        self.assertEqual(entries, [(self.temp_dir, [], ["sample_file.txt"])])
 
     def test_makedirs_and_rmtree(self):
         new_dir = os.path.join(self.temp_dir, "new_directory")
@@ -726,6 +765,9 @@ class IsRemotePathTest(test_case.TestCase):
     def test_readahead_remote_path(self):
         self.assertTrue(file_utils.is_remote_path("/readahead/some/path"))
 
+    def test_namespace_remote_path(self):
+        self.assertTrue(file_utils.is_remote_path("/namespace/some/path"))
+
     def test_non_remote_paths(self):
         self.assertFalse(file_utils.is_remote_path("/local/path/to/file.txt"))
         self.assertFalse(
@@ -738,12 +780,63 @@ class IsRemotePathTest(test_case.TestCase):
         self.assertFalse(file_utils.is_remote_path("~/relative/path"))
 
 
-class TestRaiseIfNoGFile(test_case.TestCase):
-    def test_raise_if_no_gfile_raises_correct_message(self):
+class RemotePathTest(test_case.TestCase):
+    # A module that can never be imported, used to hide `gfile` / `epath`.
+    _UNAVAILABLE = LazyModule("keras_test_unavailable_module")
+
+    def test_is_remote_path_or_raise_raises_correct_message(self):
         path = "gs://bucket/some/file.txt"
         expected_error_msg = (
-            "Handling remote paths requires installing TensorFlow "
-            f".*Received path: {path}"
+            r"Handling remote paths requires installing etils\[epath\] "
+            r"\(e\.g\. `pip install keras\[gcs\]`\) or TensorFlow\. "
+            f"Received: path={path}"
         )
-        with self.assertRaisesRegex(ValueError, expected_error_msg):
-            file_utils._raise_if_no_gfile(path)
+        with (
+            patch.object(file_utils, "gfile", self._UNAVAILABLE),
+            patch.object(file_utils, "epath", self._UNAVAILABLE),
+        ):
+            with self.assertRaisesRegex(ValueError, expected_error_msg):
+                file_utils._is_remote_path_or_raise(path)
+            self.assertFalse(
+                file_utils._is_remote_path_or_raise("/local/path/file.txt")
+            )
+
+    def test_remote_path(self):
+        root = self.get_temp_dir()
+        with patch.object(file_utils, "is_remote_path", lambda p: True):
+            subdir = file_utils.join(root, "a", "b")
+            self.assertEqual(subdir, os.path.join(root, "a", "b"))
+            self.assertEqual(file_utils.join(subdir, ""), subdir + "/")
+            self.assertEqual(file_utils.join(subdir + "/"), subdir + "/")
+            file_utils.makedirs(subdir)
+            file_utils.makedirs(subdir)  # Tolerates an existing directory.
+            self.assertTrue(file_utils.isdir(subdir))
+
+            src = file_utils.join(subdir, "src.txt")
+            dst = file_utils.join(subdir, "dst.txt")
+            with file_utils.File(src, "w") as f:
+                f.write("new")
+            with file_utils.File(dst, "w") as f:
+                f.write("old")
+            file_utils.copy(src, dst)  # Overwrites.
+            with file_utils.File(dst, "r") as f:
+                self.assertEqual(f.read(), "new")
+            self.assertEqual(
+                sorted(file_utils.listdir(subdir)), ["dst.txt", "src.txt"]
+            )
+            parent = file_utils.join(root, "a")
+            self.assertEqual(
+                [
+                    (dirpath, dirs, sorted(files))
+                    for dirpath, dirs, files in file_utils.walk(parent)
+                ],
+                [
+                    (parent, ["b"], []),
+                    (subdir, [], ["dst.txt", "src.txt"]),
+                ],
+            )
+
+            file_utils.remove(dst)
+            self.assertFalse(file_utils.exists(dst))
+            file_utils.rmtree(parent)
+            self.assertFalse(file_utils.exists(subdir))

@@ -5,7 +5,8 @@ from absl.testing import parameterized
 from keras.src import backend
 from keras.src import ops
 from keras.src import testing
-from keras.src.backend.common.keras_tensor import KerasTensor
+from keras.src.backend.common import KerasTensor
+from keras.src.backend.common import standardize_dtype
 from keras.src.ops import linalg
 from keras.src.testing.test_utils import named_product
 
@@ -85,6 +86,8 @@ class LinalgOpsDynamicShapeTest(testing.TestCase):
         lu, p = linalg.lu_factor(x)
         self.assertEqual(lu.shape, (None, 2, 3))
         self.assertEqual(p.shape, (None, 2))
+        # The pivots are indices, so they are integers, not floats.
+        self.assertEqual(p.dtype, "int32")
 
     def test_matrix_rank(self):
         x = KerasTensor([None, 4, 5])
@@ -98,6 +101,25 @@ class LinalgOpsDynamicShapeTest(testing.TestCase):
         with self.assertRaises(ValueError):
             linalg.matrix_rank(x)
 
+    def test_matrix_power(self):
+        x = KerasTensor([None, 20, 20])
+        out = linalg.matrix_power(x, 3)
+        self.assertEqual(out.shape, (None, 20, 20))
+
+        out = linalg.matrix_power(x, 0)
+        self.assertEqual(out.shape, (None, 20, 20))
+
+        out = linalg.matrix_power(x, -2)
+        self.assertEqual(out.shape, (None, 20, 20))
+
+        x = KerasTensor([None, None, 20])
+        with self.assertRaises(ValueError):
+            linalg.matrix_power(x, 3)
+
+        x = KerasTensor([None, 20, 15])
+        with self.assertRaises(ValueError):
+            linalg.matrix_power(x, 3)
+
     def test_norm(self):
         x = KerasTensor((None, 3))
         self.assertEqual(linalg.norm(x).shape, ())
@@ -107,6 +129,8 @@ class LinalgOpsDynamicShapeTest(testing.TestCase):
         self.assertEqual(
             linalg.norm(x, axis=1, keepdims=True).shape, (None, 1, 3)
         )
+        self.assertEqual(linalg.norm(x, axis=(1, 2)).shape, (None,))
+        self.assertEqual(linalg.norm(x, axis=[1, 2]).shape, (None,))
 
     def test_pinv(self):
         x = KerasTensor([None, 4, 3])
@@ -286,6 +310,8 @@ class LinalgOpsStaticShapeTest(testing.TestCase):
         lu, p = linalg.lu_factor(x)
         self.assertEqual(lu.shape, (10, 2, 3))
         self.assertEqual(p.shape, (10, 2))
+        # The pivots are indices, so they are integers, not floats.
+        self.assertEqual(p.dtype, "int32")
 
     def test_matrix_rank(self):
         x = KerasTensor([4, 3, 5])
@@ -295,6 +321,15 @@ class LinalgOpsStaticShapeTest(testing.TestCase):
         x = KerasTensor([10])
         with self.assertRaises(ValueError):
             linalg.matrix_rank(x)
+
+    def test_matrix_power(self):
+        x = KerasTensor([4, 3, 3])
+        out = linalg.matrix_power(x, 3)
+        self.assertEqual(out.shape, (4, 3, 3))
+
+        x = KerasTensor([10, 20, 15])
+        with self.assertRaises(ValueError):
+            linalg.matrix_power(x, 3)
 
     def test_norm(self):
         x = KerasTensor((10, 3))
@@ -385,18 +420,18 @@ class LinalgOpsStaticShapeTest(testing.TestCase):
 
 class LinalgOpsCorrectnessTest(testing.TestCase):
     def test_cholesky(self):
-        if backend.backend() != "openvino":
-            # OpenVINO builds a lazy graph and cannot raise on non-PSD inputs
-            # at graph-construction time; sqrt of a negative produces
-            # NaN silently at inference. There is no check_numerics equivalent
-            # in opset15 that can interrupt execution and surface a Python
-            # exception.
-            x_non_psd = np.random.rand(4, 3, 3).astype("float32")
-            with self.assertRaises(ValueError):
-                linalg.cholesky(x_non_psd)
+        # Shift the diagonal negative: without it the four uniform
+        # matrices are occasionally all positive definite, and
+        # assertRaises then fails intermittently.
+        x_non_psd = np.random.rand(4, 3, 3).astype("float32")
+        x_non_psd -= 10.0 * np.eye(3, dtype="float32")
+        with self.assertRaises(ValueError):
+            linalg.cholesky(x_non_psd)
 
         x = np.random.rand(4, 3, 3).astype("float32")
-        x_psd = np.matmul(x, x.transpose((0, 2, 1))) + 1e-5 * np.eye(
+        # 0.1 keeps the matrix well conditioned; at 1e-5 the smallest pivot
+        # could reach ~3e-3 and float32 rounding then exceeded atol.
+        x_psd = np.matmul(x, x.transpose((0, 2, 1))) + 0.1 * np.eye(
             3, dtype="float32"
         )
 
@@ -509,6 +544,12 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         x_reconstructed = _reconstruct(lu, pivots, m, n)
         self.assertAllClose(x_reconstructed, x, atol=1e-5)
 
+        # The symbolic pivots dtype must match the eager one.
+        _, symbolic_pivots = linalg.LuFactor().symbolic_call(
+            KerasTensor((m, n), dtype="float32")
+        )
+        self.assertEqual(standardize_dtype(pivots.dtype), symbolic_pivots.dtype)
+
         m, n = 4, 3
         x = np.random.rand(m, n)
         if backend.backend() == "tensorflow":
@@ -536,7 +577,7 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         named_product(
             ndim=[1, 2],
             ord=[None, "fro", "nuc", -np.inf, -2, -1, 0, 1, 2, np.inf, 3],
-            axis=[None, 1, -1, (0, 1)],
+            axis=[None, 1, -1, (0, 1), [0, 1]],
             keepdims=[False, True],
         )
     )
@@ -549,19 +590,20 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         vector_norm = (ndim == 1) or isinstance(axis, int)
 
         axis_out_of_bounds = ndim == 1 and (
-            axis == 1 or isinstance(axis, tuple)
+            axis == 1 or isinstance(axis, (list, tuple))
         )
         expected_error = None
         # when an out of bounds axis triggers an IndexError on torch is complex
         if (
             axis_out_of_bounds
-            and (not isinstance(axis, tuple) or ord is None)
+            and (not isinstance(axis, (list, tuple)) or ord is None)
             and ord not in ("fro", "nuc")
         ):
             expected_error = IndexError
         elif (
             axis_out_of_bounds
-            or (vector_norm and isinstance(axis, tuple))  # inv. axis for vector
+            # invalid axis for vector
+            or (vector_norm and isinstance(axis, (list, tuple)))
             or (vector_norm and ord in ("fro", "nuc"))  # invalid ord for vector
             or (not vector_norm and ord in (0, 3))  # invalid ord for matrix
         ):
@@ -577,7 +619,10 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
             return
         output = linalg.norm(x, ord=ord, axis=axis, keepdims=keepdims)
         expected_result = np.linalg.norm(
-            x, ord=ord, axis=axis, keepdims=keepdims
+            x,
+            ord=ord,
+            axis=tuple(axis) if isinstance(axis, list) else axis,
+            keepdims=keepdims,
         )
         self.assertAllClose(output, expected_result, atol=1e-5)
 
@@ -599,6 +644,22 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         output = linalg.solve(x1, x2)
         expected_result = np.array([[2, 0], [0, 2]], dtype="float32")
         self.assertAllClose(output, expected_result)
+
+    @parameterized.named_parameters(
+        named_product(batch_shape=[(), (1,), (2,), (3,), (2, 3)])
+    )
+    def test_solve_vector_rhs(self, batch_shape):
+        shape = batch_shape + (2,)
+        diagonals = np.arange(1, np.prod(shape) + 1, dtype="float32").reshape(
+            shape
+        )
+        a = diagonals[..., :, None] * np.eye(2, dtype="float32")
+        b = 2 * (diagonals + 1)
+        expected_result = b / diagonals
+        self.assertAllClose(linalg.solve(a, b), expected_result)
+        self.assertAllClose(
+            linalg.solve(a, b[..., None]), expected_result[..., None]
+        )
 
     def test_solve_triangular(self):
         # 2d-case
@@ -647,13 +708,13 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         # was the source of historical flakiness on the torch backend.
         rng = np.random.default_rng(0)
         a = rng.random((5, 7)).astype("float32")
-        a_symb = backend.KerasTensor((5, 7))
+        a_symb = KerasTensor((5, 7))
         if b_rank == 1:
             b = rng.random((5,)).astype("float32")
-            b_symb = backend.KerasTensor((5,))
+            b_symb = KerasTensor((5,))
         else:
             b = rng.random((5, 4)).astype("float32")
-            b_symb = backend.KerasTensor((5, 4))
+            b_symb = KerasTensor((5, 4))
         out = linalg.lstsq(a, b, rcond=rcond)
         ref_out = np.linalg.lstsq(a, b, rcond=rcond)[0]
         self.assertAllClose(
@@ -662,6 +723,11 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
 
         out_symb = linalg.lstsq(a_symb, b_symb)
         self.assertEqual(out_symb.shape, out.shape)
+
+    def test_lstsq_zero_matrix(self):
+        a = np.zeros((3, 3), dtype="float32")
+        b = np.ones((3, 1), dtype="float32")
+        self.assertAllClose(linalg.lstsq(a, b), np.linalg.lstsq(a, b)[0])
 
     def test_matrix_rank(self):
         # Full-rank tall matrix: rank equals number of columns.
@@ -694,8 +760,60 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         self.assertEqual(rank_loose, 1)
 
         # Symbolic shape propagation.
-        a_symb = backend.KerasTensor((4, 3, 5), dtype="float32")
+        a_symb = KerasTensor((4, 3, 5), dtype="float32")
         self.assertEqual(linalg.matrix_rank(a_symb).shape, (4,))
+
+    def test_matrix_power(self):
+        # Seeded: the negative-power case inverts the input, so its accuracy
+        # depends on how well conditioned the drawn matrix is.
+        rng = np.random.default_rng(0)
+        x = rng.random((4, 3, 3)).astype("float32")
+        # Positive power
+        out = linalg.matrix_power(x, 3)
+        expected = np.linalg.matrix_power(x, 3)
+        self.assertAllClose(
+            out, expected, atol=1e-6, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
+
+        # Zero power
+        out = linalg.matrix_power(x, 0)
+        expected = np.linalg.matrix_power(x, 0)
+        self.assertAllClose(
+            out, expected, atol=1e-6, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
+
+        # Zero power (2D)
+        x_2d = rng.random((3, 3)).astype("float32")
+        out = linalg.matrix_power(x_2d, 0)
+        expected = np.linalg.matrix_power(x_2d, 0)
+        self.assertAllClose(
+            out, expected, atol=1e-6, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
+
+        # Negative power. The `3 *` keeps the matrix well conditioned so the
+        # float32 inverse stays within `atol`.
+        x_inv_stable = (x + 3 * np.eye(3)).astype("float32")
+        out = linalg.matrix_power(x_inv_stable, -2)
+        expected = np.linalg.matrix_power(x_inv_stable, -2)
+        self.assertAllClose(
+            out, expected, atol=1e-6, tpu_atol=1e-2, tpu_rtol=1e-2
+        )
+
+        # Power 1
+        out = linalg.matrix_power(x, 1)
+        self.assertAllClose(out, x, atol=1e-6, tpu_atol=1e-2, tpu_rtol=1e-2)
+
+        # Error cases
+        with self.assertRaises(TypeError):
+            linalg.matrix_power(x, 3.5)
+
+        with self.assertRaises(ValueError):
+            # Non-square
+            linalg.matrix_power(rng.random((4, 3, 2)), 2)
+
+        with self.assertRaises(ValueError):
+            # Rank < 2
+            linalg.matrix_power(rng.random((4,)), 2)
 
     @parameterized.named_parameters(
         ("tall_default_rcond", (7, 4), None),
@@ -715,7 +833,7 @@ class LinalgOpsCorrectnessTest(testing.TestCase):
         a_out = ops.matmul(ops.matmul(a, out), a)
         self.assertAllClose(a_out, a, atol=1e-4, tpu_atol=1e-2, tpu_rtol=1e-2)
 
-        a_symb = backend.KerasTensor(shape, dtype="float32")
+        a_symb = KerasTensor(shape, dtype="float32")
         out_symb = linalg.pinv(a_symb)
         self.assertEqual(out_symb.shape, (shape[1], shape[0]))
 
@@ -781,15 +899,15 @@ class QrOpTest(testing.TestCase):
         self.assertEqual(r.shape, (10, 10))
 
     def test_jvp(self):
-        if backend.backend() in ["openvino", "numpy"]:
+        if not backend.SUPPORTS_GRADIENT:
             pytest.skip("Backend does not support jvp operation")
         a1, a2 = ops.convert_to_tensor(0.1), ops.convert_to_tensor(0.2)
-        primals, tangents = linalg.jvp(backend.numpy.sin, (a1,), (a2,))
+        primals, tangents = linalg.jvp(backend.ops.numpy.sin, (a1,), (a2,))
         self.assertAllClose(primals, 0.0998, atol=1e-4)
         self.assertAllClose(tangents, 0.1990, atol=1e-4)
 
         def f(x):
-            return backend.numpy.sin(x), x**2
+            return backend.ops.numpy.sin(x), x**2
 
         primals_out, tangents_out, aux = linalg.jvp(
             f, (a1,), (a2,), has_aux=True

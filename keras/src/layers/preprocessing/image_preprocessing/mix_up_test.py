@@ -1,10 +1,9 @@
 import numpy as np
-from tensorflow import data as tf_data
 
 from keras.src import backend
 from keras.src import layers
 from keras.src import testing
-from keras.src.backend import convert_to_tensor
+from keras.src.utils.module_utils import tensorflow as tf
 
 
 class MixUpTest(testing.TestCase):
@@ -68,7 +67,7 @@ class MixUpTest(testing.TestCase):
     def test_tf_data_compatibility(self):
         layer = layers.MixUp()
         input_data = np.random.random((2, 8, 8, 3))
-        ds = tf_data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
+        ds = tf.data.Dataset.from_tensor_slices(input_data).batch(2).map(layer)
         for output in ds.take(1):
             output.numpy()
 
@@ -99,8 +98,8 @@ class MixUpTest(testing.TestCase):
         )
 
         transformation = {
-            "mix_weight": convert_to_tensor([0.5, 0.5]),
-            "permutation_order": convert_to_tensor([1, 0]),
+            "mix_weight": backend.ops.convert_to_tensor([0.5, 0.5]),
+            "permutation_order": backend.ops.convert_to_tensor([1, 0]),
         }
         output = random_flip_layer.transform_bounding_boxes(
             input_data["bounding_boxes"],
@@ -131,7 +130,7 @@ class MixUpTest(testing.TestCase):
         input_data = {"images": input_image, "bounding_boxes": bounding_boxes}
         expected_boxes = [[2, 1, 4, 3, 6, 4, 8, 6], [6, 4, 8, 6, 2, 1, 4, 3]]
 
-        ds = tf_data.Dataset.from_tensor_slices(input_data)
+        ds = tf.data.Dataset.from_tensor_slices(input_data)
         layer = layers.MixUp(
             data_format=data_format,
             seed=42,
@@ -139,8 +138,8 @@ class MixUpTest(testing.TestCase):
         )
 
         transformation = {
-            "mix_weight": convert_to_tensor([0.5, 0.5]),
-            "permutation_order": convert_to_tensor([1, 0]),
+            "mix_weight": backend.ops.convert_to_tensor([0.5, 0.5]),
+            "permutation_order": backend.ops.convert_to_tensor([1, 0]),
         }
         ds = ds.map(
             lambda x: layer.transform_bounding_boxes(

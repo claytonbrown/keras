@@ -1,10 +1,11 @@
 import numpy as np
 
-from keras.src import backend
+from keras.src import initializers
 from keras.src import layers
 from keras.src import ops
 from keras.src import regularizers
 from keras.src import testing
+from keras.src.backend.common import AutocastScope
 
 
 class LayerNormalizationTest(testing.TestCase):
@@ -84,10 +85,45 @@ class LayerNormalizationTest(testing.TestCase):
 
     def test_invalid_axis(self):
         with self.assertRaisesRegex(
-            TypeError,
-            ("Expected an int or a list/tuple of ints for the argument 'axis'"),
+            TypeError, "Expected `axis` to be an integer"
         ):
             layers.LayerNormalization(axis={"axis": -1})
+        with self.assertRaisesRegex(
+            TypeError, r"Expected `axis\[1\]` to be an integer"
+        ):
+            layers.LayerNormalization(axis=[1, 2.0])
+
+    def test_out_of_bounds_axis(self):
+        # `build()` used to index `input_shape` directly, so an out-of-bounds
+        # axis surfaced as a bare `IndexError: tuple index out of range`
+        # instead of the `ValueError` already raised by
+        # `compute_output_shape()`.
+        x = np.zeros((2, 4), dtype="float32")
+        for axis in (2, 99, -3, -99):
+            with self.assertRaisesRegex(ValueError, "is out of bounds"):
+                layers.LayerNormalization(axis=axis)(x)
+        # A list of axes is validated element-wise.
+        with self.assertRaisesRegex(ValueError, "is out of bounds"):
+            layers.LayerNormalization(axis=[0, 99])(x)
+        # `build()` and `compute_output_shape()` agree.
+        with self.assertRaisesRegex(ValueError, "is out of bounds"):
+            layers.LayerNormalization(axis=99).build((2, 4))
+        with self.assertRaisesRegex(ValueError, "is out of bounds"):
+            layers.LayerNormalization(axis=99).compute_output_shape((2, 4))
+
+    def test_duplicate_axis(self):
+        # `[-1, 1]` refers to the same axis twice for a rank 2 input, which
+        # used to build mismatched weights and fail in the backend.
+        x = np.zeros((2, 4), dtype="float32")
+        with self.assertRaisesRegex(ValueError, "Duplicate axes"):
+            layers.LayerNormalization(axis=[-1, 1])(x)
+        with self.assertRaisesRegex(ValueError, "Duplicate axes"):
+            layers.LayerNormalization(axis=[1, 1])(x)
+
+    def test_axis_is_canonicalized(self):
+        layer = layers.LayerNormalization(axis=-1)
+        layer.build((2, 4))
+        self.assertEqual(layer.axis, [1])
 
     def test_correctness(self):
         layer = layers.LayerNormalization(dtype="float32")
@@ -128,9 +164,27 @@ class LayerNormalizationTest(testing.TestCase):
         layer.build((1, 4, 4, 3))
         # Use 70000 to trigger overflow for float16
         large_value = ops.full(layer.gamma.shape, 70000)
-        with backend.AutocastScope("float16"):
+        with AutocastScope("float16"):
             layer.gamma.assign(large_value)
             self.assertAllClose(layer.gamma.value, large_value)
+
+    def test_beta_preserved_for_large_constant_inputs(self):
+        x = ops.full((2, 1), 1e10)
+        layer = layers.LayerNormalization(
+            axis=-1,
+            epsilon=1e-3,
+            gamma_initializer="ones",
+            beta_initializer=initializers.Constant(7.0),
+        )
+        self.assertAllClose(layer(x), ops.full((2, 1), 7.0))
+
+        layer = layers.LayerNormalization(
+            axis=-1,
+            epsilon=1e-3,
+            gamma_initializer=initializers.Constant(3.0),
+            beta_initializer=initializers.Constant(7.0),
+        )
+        self.assertAllClose(layer(x), ops.full((2, 1), 7.0))
 
     def test_unsorted_axis(self):
         x = np.random.randn(2, 3, 4).astype("float32")
@@ -141,3 +195,13 @@ class LayerNormalizationTest(testing.TestCase):
         self.assertEqual(out_sorted.shape, (2, 3, 4))
         self.assertEqual(out_unsorted.shape, (2, 3, 4))
         self.assertAllClose(out_sorted, out_unsorted)
+
+    def test_numpy_integer_axis(self):
+        layer = layers.LayerNormalization(axis=np.int64(-1))
+        self.assertIs(type(layer.axis), int)
+        self.assertEqual(layer.axis, -1)
+
+        layer = layers.LayerNormalization(axis=[np.int64(1), np.int64(2)])
+        self.assertEqual(layer.axis, [1, 2])
+        for axis in layer.axis:
+            self.assertIs(type(axis), int)

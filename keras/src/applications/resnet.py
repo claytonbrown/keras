@@ -2,6 +2,7 @@ from keras.src import backend
 from keras.src import layers
 from keras.src.api_export import keras_export
 from keras.src.applications import imagenet_utils
+from keras.src.backend.common import is_keras_tensor
 from keras.src.models import Functional
 from keras.src.ops import operation_utils
 from keras.src.utils import file_utils
@@ -136,7 +137,7 @@ def ResNet(
     if input_tensor is None:
         img_input = layers.Input(shape=input_shape)
     else:
-        if not backend.is_keras_tensor(input_tensor):
+        if not is_keras_tensor(input_tensor):
             img_input = layers.Input(tensor=input_tensor, shape=input_shape)
         else:
             img_input = input_tensor
@@ -306,7 +307,7 @@ def residual_block_v2(
         kernel_size: Kernel size of the bottleneck layer. Defaults to `3`.
         stride: Stride of the first layer. Defaults to `1`.
         conv_shortcut: Use convolution shortcut if `True`, otherwise
-            use identity shortcut. Defaults to `True`
+            use identity shortcut. Defaults to `False`
         name(optional): Name of the block
 
     Returns:

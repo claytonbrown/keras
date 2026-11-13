@@ -1,15 +1,12 @@
-import warnings
-
-import ml_dtypes
-
-from keras.src import backend
 from keras.src import constraints
 from keras.src import initializers
 from keras.src import ops
 from keras.src import regularizers
 from keras.src.api_export import keras_export
+from keras.src.backend.common import result_type
 from keras.src.layers.input_spec import InputSpec
 from keras.src.layers.layer import Layer
+from keras.src.utils import argument_validation
 
 
 @keras_export("keras.layers.GroupNormalization")
@@ -83,14 +80,21 @@ class GroupNormalization(Layer):
         gamma_constraint=None,
         **kwargs,
     ):
-        if not isinstance(groups, int) or (groups <= 0 and groups != -1):
+        groups = argument_validation.validate_int("groups", groups)
+        if groups <= 0 and groups != -1:
             raise ValueError(
                 "Received an invalid value for argument `groups`, expected "
                 "a positive integer (or `-1` for instance normalization). "
                 f"Received: groups={groups}"
             )
+        if epsilon is None or epsilon <= 0:
+            raise ValueError(
+                "Argument `epsilon` must be positive. "
+                f"Received: epsilon={epsilon}"
+            )
         super().__init__(**kwargs)
         self.supports_masking = True
+        self.autocast = False
         self.groups = groups
         self.axis = axis
         self.epsilon = epsilon
@@ -102,22 +106,6 @@ class GroupNormalization(Layer):
         self.gamma_regularizer = regularizers.get(gamma_regularizer)
         self.beta_constraint = constraints.get(beta_constraint)
         self.gamma_constraint = constraints.get(gamma_constraint)
-
-        compute_dtype = backend.standardize_dtype(self.compute_dtype)
-        try:
-            finfo = ml_dtypes.finfo(compute_dtype)
-            if self.epsilon != 0 and self.epsilon < float(finfo.eps):
-                warnings.warn(
-                    "The configured `epsilon` is smaller than what can be "
-                    f"represented in the layer compute dtype "
-                    f"({compute_dtype}); "
-                    "it may be rounded to 0 under autocast. Consider "
-                    "increasing `epsilon` or setting `autocast=False` "
-                    "for this layer.",
-                    stacklevel=2,
-                )
-        except Exception:
-            pass
 
     def build(self, input_shape):
         dim = input_shape[self.axis]
@@ -155,6 +143,7 @@ class GroupNormalization(Layer):
                 initializer=self.gamma_initializer,
                 regularizer=self.gamma_regularizer,
                 constraint=self.gamma_constraint,
+                autocast=False,
             )
         else:
             self.gamma = None
@@ -166,6 +155,7 @@ class GroupNormalization(Layer):
                 initializer=self.beta_initializer,
                 regularizer=self.beta_regularizer,
                 constraint=self.beta_constraint,
+                autocast=False,
             )
         else:
             self.beta = None
@@ -195,7 +185,7 @@ class GroupNormalization(Layer):
 
     def _apply_normalization(self, reshaped_inputs, input_shape):
         inputs_dtype = reshaped_inputs.dtype
-        compute_dtype = backend.result_type(inputs_dtype, "float32")
+        compute_dtype = result_type(inputs_dtype, "float32")
         # GN is prone to overflow with float16/bfloat16 inputs, so we upcast to
         # float32 for the subsequent computations.
         reshaped_inputs = ops.cast(reshaped_inputs, compute_dtype)
@@ -217,13 +207,12 @@ class GroupNormalization(Layer):
             gamma = ops.cast(gamma, reshaped_inputs.dtype)
             inv = inv * gamma
 
-        res = -mean * inv
+        normalized_inputs = (reshaped_inputs - mean) * inv
         if self.center:
             beta = ops.reshape(self.beta, broadcast_shape)
             beta = ops.cast(beta, reshaped_inputs.dtype)
-            res = res + beta
+            normalized_inputs = normalized_inputs + beta
 
-        normalized_inputs = reshaped_inputs * inv + res
         normalized_inputs = ops.cast(normalized_inputs, inputs_dtype)
 
         return normalized_inputs

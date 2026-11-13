@@ -9,6 +9,7 @@ from keras.src.layers.input_spec import InputSpec
 from keras.src.layers.layer import Layer
 from keras.src.layers.rnn.dropout_rnn_cell import DropoutRNNCell
 from keras.src.layers.rnn.rnn import RNN
+from keras.src.utils import argument_validation
 
 
 @keras_export("keras.layers.SimpleRNNCell")
@@ -95,11 +96,7 @@ class SimpleRNNCell(Layer, DropoutRNNCell):
         seed=None,
         **kwargs,
     ):
-        if units <= 0:
-            raise ValueError(
-                "Received an invalid value for argument `units`, "
-                f"expected a positive integer, got {units}."
-            )
+        units = argument_validation.validate_int("units", units, min_value=1)
         super().__init__(**kwargs)
         self.seed = seed
         self.seed_generator = backend.random.SeedGenerator(seed)
@@ -247,6 +244,7 @@ class SimpleRNN(RNN):
         recurrent_dropout: Float between 0 and 1.
             Fraction of the units to drop for the linear transformation of the
             recurrent state. Default: 0.
+        seed: Random seed for dropout.
         return_sequences: Boolean. Whether to return the last output
             in the output sequence, or the full sequence. Default: `False`.
         return_state: Boolean. Whether to return the last state
@@ -439,6 +437,7 @@ class SimpleRNN(RNN):
             "bias_constraint": constraints.serialize(self.bias_constraint),
             "dropout": self.dropout,
             "recurrent_dropout": self.recurrent_dropout,
+            "seed": self.cell.seed,
         }
         base_config = super().get_config()
         del base_config["cell"]

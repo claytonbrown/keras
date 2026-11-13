@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import tensorflow as tf
 from absl.testing import parameterized
 
 from keras.src import backend
@@ -18,10 +17,12 @@ from keras.src import saving
 from keras.src import testing
 from keras.src import tree
 from keras.src import utils
+from keras.src.backend.common import StatelessScope
 from keras.src.dtype_policies.dtype_policy import DTypePolicy
 from keras.src.saving import object_registration
 from keras.src.utils.jax_layer import FlaxLayer
 from keras.src.utils.jax_layer import JaxLayer
+from keras.src.utils.module_utils import tensorflow as tf
 
 try:
     import flax
@@ -217,7 +218,7 @@ class TestJaxLayer(testing.TestCase):
         # Fake MNIST data
         x_train = random.uniform(shape=(320, 28, 28, 1))
         y_train_indices = ops.cast(
-            ops.random.uniform(shape=(320,), minval=0, maxval=num_classes),
+            random.uniform(shape=(320,), minval=0, maxval=num_classes),
             dtype="int32",
         )
         y_train = ops.one_hot(y_train_indices, num_classes, dtype="int32")
@@ -261,17 +262,17 @@ class TestJaxLayer(testing.TestCase):
         )
 
         tw1_before_fit = tree.map_structure(
-            backend.convert_to_numpy, layer1.trainable_weights
+            backend.ops.convert_to_numpy, layer1.trainable_weights
         )
         ntw1_before_fit = tree.map_structure(
-            backend.convert_to_numpy, layer1.non_trainable_weights
+            backend.ops.convert_to_numpy, layer1.non_trainable_weights
         )
         model1.fit(x_train, y_train, epochs=1, steps_per_epoch=10)
         tw1_after_fit = tree.map_structure(
-            backend.convert_to_numpy, layer1.trainable_weights
+            backend.ops.convert_to_numpy, layer1.trainable_weights
         )
         ntw1_after_fit = tree.map_structure(
-            backend.convert_to_numpy, layer1.non_trainable_weights
+            backend.ops.convert_to_numpy, layer1.non_trainable_weights
         )
 
         # verify both trainable and non-trainable weights did change after fit
@@ -288,10 +289,10 @@ class TestJaxLayer(testing.TestCase):
 
         # verify both trainable and non-trainable weights did not change
         tw1_after_call = tree.map_structure(
-            backend.convert_to_numpy, layer1.trainable_weights
+            backend.ops.convert_to_numpy, layer1.trainable_weights
         )
         ntw1_after_call = tree.map_structure(
-            backend.convert_to_numpy, layer1.non_trainable_weights
+            backend.ops.convert_to_numpy, layer1.non_trainable_weights
         )
         for after_fit, after_call in zip(tw1_after_fit, tw1_after_call):
             self.assertAllClose(after_fit, after_call)
@@ -299,11 +300,11 @@ class TestJaxLayer(testing.TestCase):
             self.assertAllClose(after_fit, after_call)
 
         exported_params = jax.tree_util.tree_map(
-            backend.convert_to_numpy, layer1.params
+            backend.ops.convert_to_numpy, layer1.params
         )
         if layer1.state is not None:
             exported_state = jax.tree_util.tree_map(
-                backend.convert_to_numpy, layer1.state
+                backend.ops.convert_to_numpy, layer1.state
             )
         else:
             exported_state = None
@@ -718,42 +719,36 @@ class TestJaxLayer(testing.TestCase):
         {
             "testcase_name": "sequence_instead_of_mapping",
             "init_state": [0.0],
-            "error_regex": "Expected dict, got ",
         },
         {
             "testcase_name": "mapping_instead_of_sequence",
             "init_state": {"state": {"foo": 0.0}},
-            "error_regex": "Expected list, got ",
         },
         {
             "testcase_name": "sequence_instead_of_variable",
             "init_state": {"state": [[0.0]]},
-            "error_regex": "Structure mismatch",
         },
         {
             "testcase_name": "no_initial_state",
             "init_state": None,
-            "error_regex": "Expected dict, got None",
         },
         {
             "testcase_name": "missing_dict_key",
             "init_state": {"state": {}},
-            "error_regex": "Expected list, got ",
         },
         {
             "testcase_name": "missing_variable_in_list",
             "init_state": {"state": {"foo": [2.0]}},
-            "error_regex": "Expected list, got ",
         },
     )
-    def test_state_mismatch_during_update(self, init_state, error_regex):
+    def test_state_mismatch_during_update(self, init_state):
         def jax_fn(params, state, inputs):
             return inputs, {"state": [jnp.ones([])]}
 
         layer = JaxLayer(
             jax_fn, params={}, state=init_state, **self.init_kwargs
         )
-        with self.assertRaisesRegex(ValueError, error_regex):
+        with self.assertRaises(ValueError):
             layer(np.ones((1,)))
 
     def test_rng_seeding(self):
@@ -772,3 +767,42 @@ class TestJaxLayer(testing.TestCase):
         layer2 = JaxLayer(jax_apply, jax_init, **self.init_kwargs)
         layer2.build(shape)
         self.assertAllClose(layer1.params[0], layer2.params[0])
+
+    def test_with_keras_variable_leaves(self):
+        def jax_call_fn(params, state, inputs):
+            return jnp.dot(inputs, params["w"]) + state["b"], state
+
+        w = backend.Variable(initializer="ones", shape=(3, 2), trainable=True)
+        b = backend.Variable(initializer="zeros", shape=(2,), trainable=False)
+        layer = JaxLayer(
+            jax_call_fn, params={"w": w}, state={"b": b}, **self.init_kwargs
+        )
+
+        # The variables are used as-is, not copied.
+        self.assertIs(layer.params["w"], w)
+        self.assertIs(layer.state["b"], b)
+        self.assertLen(layer.trainable_weights, 1)
+        self.assertIs(layer.trainable_weights[0], w)
+        self.assertLen(layer.non_trainable_weights, 1)
+        self.assertIs(layer.non_trainable_weights[0], b)
+
+        # The layer reads the current value of the variables.
+        w.assign(np.full((3, 2), 2.0, dtype="float32"))
+        out = layer(np.ones((1, 3), dtype="float32"))
+        self.assertAllClose(out, np.full((1, 2), 6.0, dtype="float32"))
+
+    def test_with_keras_variable_leaves_uninitialized(self):
+        def jax_call_fn(params, inputs):
+            return jnp.dot(inputs, params["w"])
+
+        with StatelessScope(initialize_variables=False):
+            w = backend.Variable(initializer="ones", shape=(3, 2))
+            layer = JaxLayer(jax_call_fn, params={"w": w}, **self.init_kwargs)
+
+        # Creating the layer does not initialize or copy the variable.
+        self.assertIsNone(w._value)
+        self.assertIs(layer.params["w"], w)
+
+        w._deferred_initialize()
+        out = layer(np.ones((1, 3), dtype="float32"))
+        self.assertAllClose(out, np.full((1, 2), 3.0, dtype="float32"))

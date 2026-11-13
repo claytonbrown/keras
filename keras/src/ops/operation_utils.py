@@ -2,10 +2,9 @@ import math
 
 import numpy as np
 
-from keras.src import backend
 from keras.src import tree
 from keras.src.api_export import keras_export
-from keras.src.backend import KerasTensor
+from keras.src.backend.common import KerasTensor
 from keras.src.backend.common.backend_utils import canonicalize_axis
 from keras.src.backend.common.backend_utils import to_tuple_or_list
 
@@ -261,9 +260,14 @@ def compute_matmul_output_shape(shape1, shape2):
     Returns:
         Tuple of ints: The output shape for the `matmul` operation.
     """
-    if len(shape1) == 1:
+    # Track whether each operand was 1-D before it gets promoted to 2-D
+    # below; the temporary dimension is removed from the output afterwards
+    # (matching `np.matmul`).
+    x1_is_1d = len(shape1) == 1
+    x2_is_1d = len(shape2) == 1
+    if x1_is_1d:
         shape1 = (1, shape1[0])
-    if len(shape2) == 1:
+    if x2_is_1d:
         shape2 = (shape2[0], 1)
     if (
         shape1[-1] is not None
@@ -279,11 +283,32 @@ def compute_matmul_output_shape(shape1, shape2):
     leading_shape = broadcast_shapes(shape1[:-2], shape2[:-2])
     last_2_dims_shape = [shape1[-2], shape2[-1]]
     output_shape = leading_shape + last_2_dims_shape
-    if len(shape1) == 1:
+    if x1_is_1d:
         del output_shape[-2]
-    if len(shape2) == 1:
+    if x2_is_1d:
         del output_shape[-1]
     return tuple(output_shape)
+
+
+def standardize_reshape_shape(newshape, newshape_arg_name="newshape"):
+    """Normalize and validate the `newshape` argument of `reshape`.
+
+    NumPy accepts a bare integer, e.g. `np.reshape(x, -1)`, so wrap scalars
+    into a tuple for shape computations. Backends normalize the shapes they
+    receive themselves, since Keras also calls them directly. Backend
+    tensors are returned as is, since their dimensions are only known at
+    runtime.
+    """
+    from keras.src import ops
+
+    if ops.is_tensor(newshape) or isinstance(newshape, KerasTensor):
+        return newshape
+    try:
+        newshape = tuple(newshape)
+    except TypeError:
+        newshape = (newshape,)
+    validate_reshape_shape(newshape, newshape_arg_name)
+    return newshape
 
 
 def validate_reshape_shape(newshape, newshape_arg_name="newshape"):
@@ -294,8 +319,9 @@ def validate_reshape_shape(newshape, newshape_arg_name="newshape"):
     scalars resolved at runtime, such as `torch.SymInt` under `torch.compile`)
     are not validated here.
     """
+    from keras.src import ops
 
-    if backend.is_tensor(newshape) or isinstance(newshape, KerasTensor):
+    if ops.is_tensor(newshape) or isinstance(newshape, KerasTensor):
         return
 
     neg_one_count = 0
@@ -323,10 +349,12 @@ def compute_reshape_output_shape(input_shape, newshape, newshape_arg_name):
 
     This utility does not special case the 0th dimension (batch size).
     """
-    validate_reshape_shape(newshape, newshape_arg_name)
+    from keras.src import ops
+
+    newshape = standardize_reshape_shape(newshape, newshape_arg_name)
     # If `newshape` is a tensor, we infer the output rank based on its shape.
     # For example, a 1D tensor of shape (4,) indicates a 4D output shape.
-    if backend.is_tensor(newshape) or isinstance(newshape, KerasTensor):
+    if ops.is_tensor(newshape) or isinstance(newshape, KerasTensor):
         shape = getattr(newshape, "shape", None)
         if shape and len(shape) == 1 and shape[0] is not None:
             return (None,) * shape[0]
@@ -418,7 +446,7 @@ def compute_take_along_axis_output_shape(input_shape, indices_shape, axis):
     indices_shape = list(indices_shape)
     if axis is None:
         input_shape = (
-            [None] if None in input_shape else [int(np.prod(input_shape))]
+            [None] if None in input_shape else [math.prod(input_shape)]
         )
 
     if len(input_shape) != len(indices_shape):
@@ -427,6 +455,10 @@ def compute_take_along_axis_output_shape(input_shape, indices_shape, axis):
             f"but receive shape {input_shape} and {indices_shape}."
         )
 
+    if axis is not None:
+        axis = canonicalize_axis(axis, len(input_shape))
+    else:
+        axis = 0
     input_shape[axis] = indices_shape[axis]
     output_shape = broadcast_shapes(input_shape, indices_shape)
     return output_shape
